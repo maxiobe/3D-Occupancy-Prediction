@@ -611,24 +611,54 @@ def main(nusc, val_list, indice, nuscenesyaml, args, config):
         if not os.path.exists(dirs): # create directory if does not exist
             os.makedirs(dirs)
 
-        save_path_base = dict['pc_file_name'] ### copy file_name to save_path_base
-        suffix_to_remove = '.pcd.bin' ### define suffix to remove
-        if save_path_base.endswith(suffix_to_remove):
-            save_path_base = save_path_base[:-len(suffix_to_remove)] ### Slice off suffix
+        # save_path_base = dict['pc_file_name'] ### copy file_name to save_path_base
+        # suffix_to_remove = '.pcd.bin' ### define suffix to remove
+        # if save_path_base.endswith(suffix_to_remove):
+          #  save_path_base = save_path_base[:-len(suffix_to_remove)] ### Slice off suffix
 
-        output_filepath = os.path.join(dirs, save_path_base + '.npy') ### Generate output filepath
+        output_filepath = os.path.join(dirs, 'labels.npy') ### Generate output filepath
         # Save the dense semantic voxels as a numpy file with a filename corresponding to the frame
-        print(f"Saving GT to {output_filepath}...") ####
+        print(f"Saving GT to {output_filepath}") ####
         np.save(output_filepath, dense_voxels_with_semantic) ### saving point cloud
+        ply_output = os.path.join(dirs, 'ply_labels.ply')
+        print(f"Saving GT to {ply_output}")
+        save_ply(dense_voxels_with_semantic[:, :3],
+                 ply_output,
+                 labels=dense_voxels_with_semantic[:, 3])
 
         i = i + 1
         continue # moves to the next frame for processing
 
 # Function to save point cloud as ply file
-def save_ply(points, name):
-    point_cloud_original = o3d.geometry.PointCloud() # initialize empty point cloud
-    point_cloud_original.points = o3d.utility.Vector3dVector(points[:, :3]) # converts points array into vectorized format for open3d
-    o3d.io.write_point_cloud("{}.ply".format(name), point_cloud_original) # Exports point cloud to a PLY file which can be viewed using 3D visualization tools
+def save_ply(points, name, labels=None, label_to_color=None):
+    """
+    Save point cloud to a .ply file, with optional semantic labels and coloring.
+
+    Args:
+        points (np.ndarray): Nx3 or NxD point array (only first 3 used for XYZ).
+        name (str): Output file name without .ply extension.
+        labels (np.ndarray): Optional Nx1 or (N,) array of semantic labels.
+        label_to_color (dict): Optional mapping from label to RGB colors.
+    """
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points[:, :3])
+
+    if labels is not None:
+        labels = labels.reshape(-1)
+        if label_to_color is None:
+            # Random color map if none provided
+            unique_labels = np.unique(labels)
+            np.random.seed(42)
+            colors = np.random.rand(len(unique_labels), 3)
+            label_to_color = {label: colors[i] for i, label in enumerate(unique_labels)}
+
+        # Assign colors based on labels
+        color_array = np.array([label_to_color[int(label)] for label in labels])
+        pcd.colors = o3d.utility.Vector3dVector(color_array)
+
+    o3d.io.write_point_cloud("{}.ply".format(name), pcd)
+
 
 # Main entry point of the script
 if __name__ == '__main__':
