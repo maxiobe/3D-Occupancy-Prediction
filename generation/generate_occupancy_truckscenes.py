@@ -192,7 +192,8 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     # Retrieves a specific scene from the truckScenes dataset
     my_scene = trucksc.scene[indice] # scene is selected by indice parameter
     scene_name = my_scene['name']  ### Extract scene name for saving
-    sensor = 'LIDAR_TOP_FRONT' # Specifies the LiDAR sensor name
+    # sensor = 'LIDAR_TOP_FRONT' # Specifies the LiDAR sensor name
+    sensor = 'LIDAR_TOP_LEFT'
 
     # Data split handling
     if args.split == 'train':
@@ -296,7 +297,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         pcd = LidarPointCloud.from_file(pcd_file_path)
         # print(pcd.shape)
         pc0: np.ndarray = pcd.points.T
-        print(pc0.shape)
+        # print(pc0.shape)
 
         # print(pc0.shape)
 
@@ -341,13 +342,13 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
         # Assign object labels to points inside bounding boxes
         # Ensure converted_object_category has the correct mapped labels
-        #for box_idx in range(gt_bbox_3d.shape[0]):
-         #   # Get the mask for points in the current box
-         #   object_points_mask = points_in_boxes[0][:, box_idx].bool()
-         #   # Get the semantic label for this object type
-         #   object_label = converted_object_category[box_idx]
-         #   # Assign the object label to the corresponding points in the points_label
-         #   points_label[object_points_mask] = object_label
+        for box_idx in range(gt_bbox_3d.shape[0]):
+            # Get the mask for points in the current box
+            object_points_mask = points_in_boxes[0][:, box_idx].bool()
+            # Get the semantic label for this object type
+            object_label = converted_object_category[box_idx]
+            # Assign the object label to the corresponding points in the points_label
+            points_label[object_points_mask] = object_label
 
         pc_with_semantic = np.concatenate([pc0[:, :3], points_label], axis=1)
 
@@ -416,6 +417,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
         ################## record semantic information into the dict if it's a key frame  ########################
         if lidar_data['is_key_frame']: # check if keyframe
+            dict["sample_token"] = trucksc.get('sample_data', lidar_data['token'])['sample_token']
             # Apply point mask
             pc_with_semantic = pc_with_semantic[points_mask] # filters out points based on computed mask, retaining only static points (excluding dynamic objects and the vehicle itself)
             # Transform points to the first LiDAR Coordinate System
@@ -660,12 +662,12 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         dense_voxels_with_semantic = np.floor(pcd_np).astype(int) # Use flooring to convert to discrete voxel indices
 
         # Save the resulting dense voxels with semantics
-        dirs = os.path.join(save_path, scene_name) #### Save in folder with scene name
+        dirs = os.path.join(save_path, scene_name, dict['sample_token']) #### Save in folder with scene name
         if not os.path.exists(dirs): # create directory if does not exist
             os.makedirs(dirs)
 
         save_path_base = dict['pc_file_name']  ### copy file_name to save_path_base
-        suffix_to_remove = '.pcd.bin'  ### define suffix to remove
+        suffix_to_remove = '.pcd'  ### define suffix to remove
         if save_path_base.endswith(suffix_to_remove):
             save_path_base = save_path_base[:-len(suffix_to_remove)] ### Slice off suffix
 
@@ -729,7 +731,7 @@ if __name__ == '__main__':
 
     # Process sequences in a loop
     for i in range(args.start,args.end):
-        print('processing sequecne:', i)
+        print('processing sequence:', i)
         # call the main function
         # Inputs: nusc: initialized truckscenes dataset object
         # val_list: list of validation scene tokens
