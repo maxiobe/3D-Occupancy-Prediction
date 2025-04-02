@@ -1,5 +1,5 @@
 labels:
-  0: 'noise'
+  0: 'noise' # Fehlt
   1: 'animal'
   2: 'human.pedestrian.adult'
   3: 'human.pedestrian.child'
@@ -23,14 +23,20 @@ labels:
   21: 'vehicle.motorcycle'
   22: 'vehicle.trailer'
   23: 'vehicle.truck'
-  24: 'flat.driveable_surface'
-  25: 'flat.other'
-  26: 'flat.sidewalk'
-  27: 'flat.terrain'
-  28: 'static.manmade'
-  29: 'static.other'
-  30: 'static.vegetation'
-  31: 'vehicle.ego'
+  # 24: 'flat.driveable_surface' Fehlt
+  # 25: 'flat.other' Fehlt
+  # 26: 'flat.sidewalk' Fehlt
+  # 27: 'flat.terrain' Fehlt
+  # 28: 'static.manmade' Fehlt
+  # 29: 'static.other' Fehlt
+  # 30: 'static.vegetation' Fehlt
+  # 31: 'vehicle.ego' Fehlt
+  32: 'vehicle.train' # new
+  33: 'static_object.traffic_sign' # new
+  34: 'vehicle.other' # new
+  35: 'vehicle.ego_trailer' # new
+  36: 'Unknown' # new
+  37: 'Background' # new
 labels_16:
   0: 'noise'
   1: 'barrier'
@@ -43,12 +49,18 @@ labels_16:
   8: 'traffic_cone'
   9: 'trailer'
   10: 'truck'
-  11: 'driveable_surface'
-  12: 'other_flat'
-  13: 'sidewalk'
-  14: 'terrain'
-  15: 'manmade'
-  16: 'vegetation'
+  # 11: 'driveable_surface'
+  11: 'ego_vehicle' # new
+  # 12: 'other_flat'
+  12: 'traffic_sign' # new
+  # 13: 'sidewalk'
+  13: 'other_vehicle' # new
+  # 14: 'terrain'
+  14: 'train' # new
+  # 15: 'manmade'
+  15: 'Unknown' # new
+  # 16: 'vegetation'
+  16: 'Background' # new
 learning_map:
   1: 0
   5: 0
@@ -60,8 +72,8 @@ learning_map:
   19: 0
   20: 0
   0: 0
-  29: 0
-  31: 0
+  # 29: 0
+  # 31: 0
   9: 1
   14: 2
   15: 3
@@ -76,9 +88,15 @@ learning_map:
   12: 8
   22: 9
   23: 10
-  24: 11
-  25: 12
-  26: 13
-  27: 14
-  28: 15
-  30: 16
+  # 24: 11
+  # 25: 12
+  # 26: 13
+  # 27: 14
+  # 28: 15
+  # 30: 16
+  32: 14
+  33: 12
+  34: 13
+  35: 11
+  36: 15
+  37: 16

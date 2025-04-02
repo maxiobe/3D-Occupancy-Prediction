@@ -172,11 +172,11 @@ def lidar_to_world_to_lidar(pc,lidar_calibrated_sensor,lidar_ego_pose,
 
     return pc
 
-# main function as entry point for processing a specific scene from the nuScenes dataset
-# Input: nusc: a nuScenes object representing the dataset instance
+# main function as entry point for processing a specific scene from the truckScenes dataset
+# Input: trucksc: a truckScenes object representing the dataset instance
 # val_list: a list of scene tokens that are part of the validation split
 # indice: index of the scene to be processed
-# nuscenesyaml: A dictionary loaded from a YAML configuration file specific for nuScenes
+# truckscenesyaml: A dictionary loaded from a YAML configuration file specific for truckScenes
 # args: Parsed command-line arguments
 # config: a dictionary containing configuration settings
 def main(trucksc, val_list, indice, truckscenesyaml, args, config):
@@ -189,10 +189,10 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     pc_range = config['pc_range'] # Range of point cloud coordinates to consider (bounding box)
     occ_size = config['occ_size'] # Dimensions of the output occupancy grid
 
-    # Retrieves a specific scene from the nuScenes dataset
+    # Retrieves a specific scene from the truckScenes dataset
     my_scene = trucksc.scene[indice] # scene is selected by indice parameter
     scene_name = my_scene['name']  ### Extract scene name for saving
-    sensor = 'LIDAR_TOP' # Specifies the LiDAR sensor name
+    sensor = 'LIDAR_TOP_FRONT' # Specifies the LiDAR sensor name
 
     # Data split handling
     if args.split == 'train':
@@ -205,6 +205,16 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         pass
     else: # Error if split type is not recognized
         raise NotImplementedError
+
+    # Define the numeric index for the 'Unknown' class
+    # Assuming key 36 maps to 'Unknown' in labels and learning_map[36] is 15
+    unknown_label_key = 36
+    UNKNOWN_LEARNING_INDEX = learning_map.get(unknown_label_key, 15)
+
+    # Define the numeric index for the 'Background' class
+    # Assuming key 37 maps to 'Background' in labels and learning_map[37] is 16
+    background_label_key = 37
+    BACKGROUND_LEARNING_INDEX = learning_map.get(background_label_key, 16)
 
     # load the first sample from a scene to start
     first_sample_token = my_scene['first_sample_token'] # access the first sample token: contains token of first frame of the scene
@@ -239,14 +249,34 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         object_category = [truckscenes.get('sample_annotation', box_token)['category_name'] for box_token in boxes_token] # retrieves category name for each bounding box
 
         ############################# get object categories ##########################
-        converted_object_category = [] # Initialize empty list to store converted category labels
+        converted_object_category = []  # Initialize empty list
+
         # Iterate over each object category extracted earlier
         for category in object_category:
-            # Iterate over label mappings defined in nuscenes.yaml file
-            for (j, label) in enumerate(truckscenesyaml['labels']):
+            found_match = False
+            # Iterate over label mappings defined in truckscenes.yaml file
+            for label_key, label_name_in_yaml in truckscenesyaml['labels'].items():
                 # Check category and map to learning label
-                if category == truckscenesyaml['labels'][label]:
-                    converted_object_category.append(np.vectorize(learning_map.__getitem__)(label).item())
+                if category == label_name_in_yaml:
+                    mapped_label_index = learning_map.get(label_key)
+                    if mapped_label_index is not None:
+                        converted_object_category.append(mapped_label_index)
+                        found_match = True
+                        break  # Found the mapping, move to the next category
+                    else:
+                        # This case means label_key exists in 'labels' but not 'learning_map'
+                        print(
+                            f"Warning: Category '{category}' mapped to label_key '{label_key}', but '{label_key}' not found in learning_map. Using 'Unknown' label.")
+                        # --- CHANGE: Use UNKNOWN_LEARNING_INDEX ---
+                        converted_object_category.append(UNKNOWN_LEARNING_INDEX)
+                        found_match = True
+                        break
+
+            # If the category was not found in the truckscenesyaml['labels'] mapping at all
+            if not found_match:
+                print(f"Warning: Category '{category}' not found in truckscenes.yaml mapping. Using 'Unknown' label.")
+                # --- CHANGE: Use UNKNOWN_LEARNING_INDEX ---
+                converted_object_category.append(UNKNOWN_LEARNING_INDEX)
 
         ############################# get bbox attributes ##########################
         locs = np.array([b.center for b in boxes]).reshape(-1, 3) # gets center coordinates (x,y,z) of each bb
@@ -261,13 +291,23 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
         ############################# get LiDAR points with semantics ##########################
         pc_file_name = lidar_data['filename']  # load LiDAR names
+        pcd_file_path = os.path.join(data_root, pc_file_name)
+
+        pcd = LidarPointCloud.from_file(pcd_file_path)
+        # print(pcd.shape)
+        pc0: np.ndarray = pcd.points.T
+        print(pc0.shape)
+
+        # print(pc0.shape)
+
         # Load LiDAR Point Cloud Data
-        pc0 = np.fromfile(os.path.join(data_root, pc_file_name),
-                          dtype=np.float32,
-                          count=-1).reshape(-1, 5)[..., :4] # Keeps only first four columns (x, y, z, intensity)
+        #pc0 = np.fromfile(os.path.join(data_root, pc_file_name),
+         #                 dtype=np.float32,
+          #                count=-1).reshape(-1, 4)[..., :4] # Keeps only first four columns (x, y, z, intensity)
+        #print(pc0.shape)
 
         # Load semantic annotations if key frame
-        if lidar_data['is_key_frame']:  # only key frame has semantic annotations
+        """if lidar_data['is_key_frame']:  # only key frame has semantic annotations
             lidar_sd_token = lidar_data['token'] # get token of LiDAR sample data, token is used to locate corresponding semantic label
             lidarseg_labels_filename = os.path.join(truckscenes.dataroot,  # Construct path to LiDAR Semantic Annotations file
                                                     truckscenes.get('lidarseg', lidar_sd_token)['filename'])
@@ -283,7 +323,13 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             points_label = np.vectorize(learning_map.__getitem__)(points_label) # np.vectorize() to apply a function element-wise to an array
 
             # Combine points with semantic labels
-            pc_with_semantic = np.concatenate([pc0[:, :3], points_label], axis=1) # Combines point coordinates with semantic labels to form a 4D array: (x, y, z, semantic_label)
+            pc_with_semantic = np.concatenate([pc0[:, :3], points_label], axis=1) # Combines point coordinates with semantic labels to form a 4D array: (x, y, z, semantic_label) """
+
+
+
+        # Initialize labels for all points with the default label
+        num_points = pc0.shape[0]
+        points_label = np.full((num_points, 1), BACKGROUND_LEARNING_INDEX, dtype=np.uint8)
 
         ############################# cut out movable object points and masks ##########################
         points_in_boxes = points_in_boxes_cpu(torch.from_numpy(pc0[:, :3][np.newaxis, :, :]),
@@ -292,6 +338,18 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         # gt_box_3d: Array containing 3d bounding box attributes (location, size, rotation)
         # both converted to Torch tensors and reshaped with additional dimension using np.newaxis to make the shapes compatible
         # points_in_boxes: Output is a tensor of shape (1, num_boxes, numb_points), where: each element is 1 if the point is inside a bounding box and 0 otherwise
+
+        # Assign object labels to points inside bounding boxes
+        # Ensure converted_object_category has the correct mapped labels
+        #for box_idx in range(gt_bbox_3d.shape[0]):
+         #   # Get the mask for points in the current box
+         #   object_points_mask = points_in_boxes[0][:, box_idx].bool()
+         #   # Get the semantic label for this object type
+         #   object_label = converted_object_category[box_idx]
+         #   # Assign the object label to the corresponding points in the points_label
+         #   points_label[object_points_mask] = object_label
+
+        pc_with_semantic = np.concatenate([pc0[:, :3], points_label], axis=1)
 
         object_points_list = [] # creates an empty list to store points associated with each object
         j = 0
@@ -317,12 +375,12 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
         ############################# get point mask of the vehicle itself ##########################
         # goal here is to filter out points that belong to the vehicle itself
-        range = config['self_range'] # Parameter in config file that specifies a range threshold for the vehicle's own points
+        self_range = config['self_range'] # Parameter in config file that specifies a range threshold for the vehicle's own points
 
         # Mask calculation: filters out points that are too close to the vehicle in x, y or z directions
-        oneself_mask = torch.from_numpy((np.abs(pc0[:, 0]) > range[0]) |
-                                        (np.abs(pc0[:, 1]) > range[1]) |
-                                        (np.abs(pc0[:, 2]) > range[2]))
+        oneself_mask = torch.from_numpy((np.abs(pc0[:, 0]) > self_range[0]) |
+                                        (np.abs(pc0[:, 1]) > self_range[1]) |
+                                        (np.abs(pc0[:, 2]) > self_range[2]))
 
         ############################# get static scene segment ##########################
         # Combine background mask and the self-filter mask using a logical AND
@@ -547,7 +605,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         pcd_np[:, 0] = (pcd_np[:, 0] - pc_range[0]) / voxel_size # voxel size: controls the granularity of voxel grid
         pcd_np[:, 1] = (pcd_np[:, 1] - pc_range[1]) / voxel_size # point cloud range (pc_range): defines bounding box
         pcd_np[:, 2] = (pcd_np[:, 2] - pc_range[2]) / voxel_size
-        pcd_np = np.floor(pcd_np).astype(np.int) # Round down to nearest integer
+        pcd_np = np.floor(pcd_np).astype(int) # Round down to nearest integer
         voxel = np.zeros(occ_size) # initialize voxel grid with zeros to represent empty voxels
         voxel[pcd_np[:, 0], pcd_np[:, 1], pcd_np[:, 2]] = 1 # marks occupied voxels as 1
 
@@ -599,7 +657,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         pcd_np[:, 1] = (pcd_np[:, 1] - pc_range[1]) / voxel_size
         pcd_np[:, 2] = (pcd_np[:, 2] - pc_range[2]) / voxel_size
 
-        dense_voxels_with_semantic = np.floor(pcd_np).astype(np.int) # Use flooring to convert to discrete voxel indices
+        dense_voxels_with_semantic = np.floor(pcd_np).astype(int) # Use flooring to convert to discrete voxel indices
 
         # Save the resulting dense voxels with semantics
         dirs = os.path.join(save_path, scene_name) #### Save in folder with scene name
@@ -632,15 +690,15 @@ if __name__ == '__main__':
     parse = ArgumentParser()
 
     # Define Command-Line Arguments
-    parse.add_argument('--dataset', type=str, default='truckscenes') # Dataset selection with default: "nuscenes"
-    parse.add_argument('--config_path', type=str, default='config.yaml') # Configuration file path with default: "config.yaml"
+    parse.add_argument('--dataset', type=str, default='truckscenes') # Dataset selection with default: "truckScenes
+    parse.add_argument('--config_path', type=str, default='config_truckscenes.yaml') # Configuration file path with default: "config.yaml"
     parse.add_argument('--split', type=str, default='train') # data split, default: "train", options: "train", "val", "all"
     parse.add_argument('--save_path', type=str, default='./data/GT_occupancy/') # save path, default: "./data/GT/GT_occupancy"
     parse.add_argument('--start', type=int, default=0) # start indice, default: 0, determines range of sequences to process
     parse.add_argument('--end', type=int, default=850) # end indice, default: 850, determines range of sequences to process
-    parse.add_argument('--dataroot', type=str, default='./data/truckscenes/') # data root path, default: "./data/nuScenes/"
-    parse.add_argument('--trucksc_val_list', type=str, default='./truckscenes_val_list.txt') # text file containing validation scene tokens, default: "./nuscenes_val_list.txt"
-    parse.add_argument('--label_mapping', type=str, default='truckscenes.yaml') # YAML file containing label mappings, default: "nuscenes.yaml"
+    parse.add_argument('--dataroot', type=str, default='./data/truckscenes/') # data root path, default: "./data/truckScenes
+    parse.add_argument('--trucksc_val_list', type=str, default='./truckscenes_val_list.txt') # text file containing validation scene tokens, default: "./truckscenes_val_list.txt"
+    parse.add_argument('--label_mapping', type=str, default='truckscenes.yaml') # YAML file containing label mappings, default: "truckscenes.yaml"
     args=parse.parse_args()
 
 
@@ -651,7 +709,7 @@ if __name__ == '__main__':
                 val_list.append(item[:-1])
         file.close()
 
-        # Load the nuScenes dataset
+        # Load the truckScenes dataset
         truckscenes = TruckScenes(version='v1.0-trainval',
                                dataroot=args.dataroot,
                                verbose=True) # verbose True to print informational messages
@@ -673,10 +731,10 @@ if __name__ == '__main__':
     for i in range(args.start,args.end):
         print('processing sequecne:', i)
         # call the main function
-        # Inputs: nusc: initialized nuScenes dataset object
+        # Inputs: nusc: initialized truckscenes dataset object
         # val_list: list of validation scene tokens
         # indice: current scene index
-        # nuscenesyaml: loaded label mapping
+        # truckscenesyaml: loaded label mapping
         # args: parsed command-line arguments
         # config: configuration settings
         main(truckscenes, val_list, indice=i,
