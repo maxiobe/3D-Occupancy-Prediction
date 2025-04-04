@@ -2,7 +2,7 @@ from truckscenes import TruckScenes
 
 trucksc = TruckScenes('v1.0-trainval', '/home/max/ssd/Masterarbeit/TruckScenes/trainval/v1.0-trainval', True)
 
-my_scene = trucksc.scene[1]
+my_scene = trucksc.scene[0]
 print(my_scene)
 
 first_sample_token = my_scene['first_sample_token']

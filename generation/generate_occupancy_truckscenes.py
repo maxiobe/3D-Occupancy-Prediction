@@ -193,7 +193,8 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     my_scene = trucksc.scene[indice] # scene is selected by indice parameter
     scene_name = my_scene['name']  ### Extract scene name for saving
     # sensor = 'LIDAR_TOP_FRONT' # Specifies the LiDAR sensor name
-    sensor = 'LIDAR_TOP_LEFT'
+    # sensor = 'LIDAR_TOP_LEFT'
+    sensor = 'LIDAR_LEFT'
 
     # Data split handling
     if args.split == 'train':
