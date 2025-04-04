@@ -21,6 +21,7 @@ from scipy.spatial.transform import Rotation
 # import open3d
 import open3d as o3d
 from copy import deepcopy
+import cv2
 
 
 # Function to perform poisson surface reconstruction on a given point cloud and returns a mesh representation of the point cloud, along with vertex info
@@ -237,8 +238,10 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     # sensor = 'LIDAR_TOP_LEFT'
     # sensor = 'LIDAR_LEFT'
     # lidar_sensors = ['LIDAR_LEFT', 'LIDAR_RIGHT']
-    lidar_sensors = ['LIDAR_LEFT']
+    lidar_sensors = ['LIDAR_LEFT', 'LIDAR_RIGHT']
     ref_sensor = 'LIDAR_LEFT'  # Choose one sensor as the reference frame origin
+
+    camera_to_display = 'CAMERA_LEFT_BACK'
 
     # Data split handling
     if args.split == 'train':
@@ -267,6 +270,39 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         'first_sample_token']  # access the first sample token: contains token of first frame of the scene
     my_sample = trucksc.get('sample',
                             first_sample_token)  # retrieve the first sample as dictionary. Dictionary includes data from multiple sensors
+
+    """camera_data_token = my_sample['data'].get(camera_to_display)
+    print(camera_data_token)
+    if camera_data_token:
+        cam_sample_data_record = trucksc.get('sample_data', camera_data_token)
+        camera_file = cam_sample_data_record['filename']
+
+    cam_filepath = os.path.join(data_root, camera_file)
+
+    if os.path.exists(cam_filepath):
+        image = cv2.imread(cam_filepath)
+        if image is not None:
+            print(f"Displaying image: {cam_filepath}. Press any key to continue (ESC to quit)...")
+            window_title = f"Scene: {scene_name}"
+            # Optional: Resize if images are too large
+            # h, w = image.shape[:2]
+            # scale = 800 / w # Example scaling
+            # image_display = cv2.resize(image, (int(w*scale), int(h*scale)))
+            image_display = image  # Display original size
+
+            cv2.imshow(window_title, image_display)
+            key = cv2.waitKey(0)  # Wait indefinitely for key press
+            cv2.destroyWindow(window_title)  # Close the specific window
+            if key == 27:  # ESC key pressed
+                print("ESC pressed, stopping visualization and exiting.")
+                cv2.destroyAllWindows()  # Clean up any remaining windows
+                return  # Exit the main function
+        else:
+            print(f"Warning: Failed to load image file: {cam_filepath}")
+    else:
+        print(f"Warning: Image file not found: {cam_filepath}")"""
+
+
 
     try:
         ref_lidar_data0 = trucksc.get('sample_data', my_sample['data'][ref_sensor])
@@ -313,6 +349,8 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         # Extract object categories
         object_category = [trucksc.get('sample_annotation', box_token)['category_name'] for box_token in
                            boxes_token]  # retrieves category name for each bounding box
+
+        print(ref_lidar_data['is_key_frame'])
 
         ############################# get object categories ##########################
         converted_object_category = []  # Initialize empty list
@@ -660,6 +698,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         # Increment processed key frame counter
         processed_key_frame_count += 1
         print(f"\n--- Processing key frame index {i}, sample_token {d.get('sample_token', 'N/A')} ---")
+
 
         ################## convert the static scene to the target coordinate system ##############
         # retrieve calibration and pose data for the REFERENCE sensor at the CURRENT frame i
