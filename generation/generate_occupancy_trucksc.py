@@ -234,14 +234,12 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     # Retrieves a specific scene from the truckScenes dataset
     my_scene = trucksc.scene[indice]  # scene is selected by indice parameter
     scene_name = my_scene['name']  ### Extract scene name for saving
-    # sensor = 'LIDAR_TOP_FRONT' # Specifies the LiDAR sensor name
-    # sensor = 'LIDAR_TOP_LEFT'
-    # sensor = 'LIDAR_LEFT'
-    # lidar_sensors = ['LIDAR_LEFT', 'LIDAR_RIGHT']
-    lidar_sensors = ['LIDAR_LEFT', 'LIDAR_RIGHT']
-    ref_sensor = 'LIDAR_LEFT'  # Choose one sensor as the reference frame origin
 
-    camera_to_display = 'CAMERA_LEFT_BACK'
+    lidar_sensors = ['LIDAR_LEFT', 'LIDAR_RIGHT']
+    # lidar_sensors = ['LIDAR_LEFT']
+    # lidar_sensors = ['LIDAR_RIGHT']
+    ref_sensor = 'LIDAR_LEFT'  # Choose one sensor as the reference frame origin
+    # ref_sensor = 'LIDAR_RIGHT'
 
     # Data split handling
     if args.split == 'train':
@@ -270,39 +268,6 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         'first_sample_token']  # access the first sample token: contains token of first frame of the scene
     my_sample = trucksc.get('sample',
                             first_sample_token)  # retrieve the first sample as dictionary. Dictionary includes data from multiple sensors
-
-    """camera_data_token = my_sample['data'].get(camera_to_display)
-    print(camera_data_token)
-    if camera_data_token:
-        cam_sample_data_record = trucksc.get('sample_data', camera_data_token)
-        camera_file = cam_sample_data_record['filename']
-
-    cam_filepath = os.path.join(data_root, camera_file)
-
-    if os.path.exists(cam_filepath):
-        image = cv2.imread(cam_filepath)
-        if image is not None:
-            print(f"Displaying image: {cam_filepath}. Press any key to continue (ESC to quit)...")
-            window_title = f"Scene: {scene_name}"
-            # Optional: Resize if images are too large
-            # h, w = image.shape[:2]
-            # scale = 800 / w # Example scaling
-            # image_display = cv2.resize(image, (int(w*scale), int(h*scale)))
-            image_display = image  # Display original size
-
-            cv2.imshow(window_title, image_display)
-            key = cv2.waitKey(0)  # Wait indefinitely for key press
-            cv2.destroyWindow(window_title)  # Close the specific window
-            if key == 27:  # ESC key pressed
-                print("ESC pressed, stopping visualization and exiting.")
-                cv2.destroyAllWindows()  # Clean up any remaining windows
-                return  # Exit the main function
-        else:
-            print(f"Warning: Failed to load image file: {cam_filepath}")
-    else:
-        print(f"Warning: Image file not found: {cam_filepath}")"""
-
-
 
     try:
         ref_lidar_data0 = trucksc.get('sample_data', my_sample['data'][ref_sensor])
@@ -350,7 +315,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         object_category = [trucksc.get('sample_annotation', box_token)['category_name'] for box_token in
                            boxes_token]  # retrieves category name for each bounding box
 
-        print(ref_lidar_data['is_key_frame'])
+        #print(ref_lidar_data['is_key_frame'])
 
         ############################# get object categories ##########################
         converted_object_category = []  # Initialize empty list
@@ -791,9 +756,10 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         print(f"Object points {temp.shape}")
 
         ################## remain points with a spatial range ##############
-        mask = (np.abs(scene_points[:, 0]) < 50.0) & (np.abs(scene_points[:, 1]) < 50.0) \
-               & (scene_points[:, 2] > -5.0) & (
-                           scene_points[:, 2] < 3.0)  # Generate mask for filtering points in x, y [-50, 50], z [-5, 3]
+        mask = (scene_points[:, 0] >= pc_range[0]) & (scene_points[:, 0] <= pc_range[3]) & \
+               (scene_points[:, 1] >= pc_range[1]) & (scene_points[:, 1] <= pc_range[4]) & \
+               (scene_points[:, 2] >= pc_range[2]) & (scene_points[:, 2] <= pc_range[
+            5])  # Generate mask for filtering points in x, y [-50, 50], z [-5, 3]
         scene_points = scene_points[mask]  # Filter points within a spatial range
 
 
@@ -814,9 +780,10 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         scene_points = np.asarray(mesh.vertices, dtype=float)  # Converts the vertices of the mesh into a numpy array
 
         ################## remain points with a spatial range (mesh vertices) ##############
-        mask = (np.abs(scene_points[:, 0]) < 50.0) & (np.abs(scene_points[:, 1]) < 50.0) \
-               & (scene_points[:, 2] > -5.0) & (
-                           scene_points[:, 2] < 3.0)  # Generate mask for filtering points in x, y [-50, 50], z [-5, 3]
+        mask = (scene_points[:, 0] >= pc_range[0]) & (scene_points[:, 0] <= pc_range[3]) & \
+               (scene_points[:, 1] >= pc_range[1]) & (scene_points[:, 1] <= pc_range[4]) & \
+               (scene_points[:, 2] >= pc_range[2]) & (scene_points[:, 2] <= pc_range[5]) # Generate mask for filtering points in x, y [-50, 50], z [-5, 3]
+
         scene_points = scene_points[mask]  # Filter points within a spatial range
 
         ################## convert points (mesh vertices) to voxels ##############
@@ -827,6 +794,8 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         pcd_np[:, 2] = (pcd_np[:, 2] - pc_range[2]) / voxel_size
         pcd_np = np.floor(pcd_np).astype(int)  # Round down to nearest integer
         voxel = np.zeros(occ_size)  # initialize voxel grid with zeros to represent empty voxels
+        # Ensure indices are within bounds
+        pcd_np = np.clip(pcd_np, a_min=[0, 0, 0], a_max=np.array(occ_size) - 1)
         voxel[pcd_np[:, 0], pcd_np[:, 1], pcd_np[:, 2]] = 1  # marks occupied voxels as 1
 
         ################## convert voxel coordinates to LiDAR system (world coords) ##############
@@ -848,9 +817,9 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         fov_voxels[:, 2] += pc_range[2]
 
         ################## get semantics of sparse points  ##############
-        mask = (np.abs(scene_semantic_points[:, 0]) < 50.0) & (np.abs(scene_semantic_points[:, 1]) < 50.0) \
-               & (scene_semantic_points[:, 2] > -5.0) & (scene_semantic_points[:,
-                                                         2] < 3.0)  # Generate mask for filtering points in x, y [-50, 50], z [-5, 3]
+        mask = (scene_semantic_points[:, 0] >= pc_range[0]) & (scene_semantic_points[:, 0] <= pc_range[3]) & \
+               (scene_semantic_points[:, 1] >= pc_range[1]) & (scene_semantic_points[:, 1] <= pc_range[4]) & \
+               (scene_semantic_points[:, 2] >= pc_range[2]) & (scene_semantic_points[:, 2] <= pc_range[5])
         scene_semantic_points = scene_semantic_points[mask]  # Filter points within a spatial range
 
         ################## Nearest Neighbor to assign semantics ##############
@@ -860,9 +829,11 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         # convert dense voxel points to torch tensor
         x = torch.from_numpy(dense_voxels).cuda().unsqueeze(
             0).float()  # uses cuda to move to a GPU and adds batch dimension by unsqueeze(0)
+        print(f"X shape is {x.shape}")
         # Convert sparse semantic points to torch tensor
         y = torch.from_numpy(sparse_voxels_semantic[:, :3]).cuda().unsqueeze(
             0).float()  # uses cuda to move to GPU and add batch dim
+        print(f"Y shape is {y.shape})")
         d1, d2, idx1, idx2 = chamfer.forward(x,
                                              y)  # Chamfer Distance to calculate nearest neighbors between dense and sparse points
         # d1, d2: distances between nearest neighbors
