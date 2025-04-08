@@ -22,7 +22,7 @@ def load_yaml(path):
         sys.exit(1)
 
 
-def visualize_bboxes(trucksc, truckscenes_dataroot, sample_token, config_path, npy_path):
+def visualize_bboxes(trucksc, truckscenes_dataroot, sample_token, config_path, npy_path, ref_sensor):
     config = load_yaml(config_path)
     voxel_size = config.get("voxel_size")
     pc_range = config.get("pc_range")
@@ -70,7 +70,7 @@ def visualize_bboxes(trucksc, truckscenes_dataroot, sample_token, config_path, n
 
     my_sample = trucksc.get('sample', sample_token)
     # print(my_sample)
-    lidar_data = trucksc.get('sample_data', my_sample['data']['LIDAR_LEFT'])
+    lidar_data = trucksc.get('sample_data', my_sample['data'][ref_sensor])
 
     _, boxes, _ = trucksc.get_sample_data(lidar_data['token'])
     # print(boxes)
@@ -117,10 +117,11 @@ if __name__ == "__main__":
     parser.add_argument("--truckscenes_yaml", type=str, default="truckscenes.yaml")
     parser.add_argument("--trsc_version", type=str, default="v1.0-trainval")
     parser.add_argument("--sample_token", type=str, default=None)
+    parser.add_argument("--ref_sensor", type=str, default='LIDAR_LEFT')
 
     args = parser.parse_args()
 
     trucksc = TruckScenes(version=args.trsc_version, dataroot=args.truckscenes_dataroot, verbose=True)
 
 
-    visualize_bboxes(trucksc, args.truckscenes_dataroot, args.sample_token, args.config_path, args.npy_path)
+    visualize_bboxes(trucksc, args.truckscenes_dataroot, args.sample_token, args.config_path, args.npy_path, args.ref_sensor)
