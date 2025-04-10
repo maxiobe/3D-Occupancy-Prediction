@@ -448,21 +448,21 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                                                              lidar_calibrated_sensor0,
                                                              lidar_ego_pose0)
 
+            pc_with_semantic_np = np.asarray(pc_with_semantic.points)
+
             if args.icp_refinement:
                 print("ICP refinement lidar pc semantic")
-                current_np_semantic = pc_with_semantic.points[:, :3]  # Convert current scan to Nx3 numpy
-                current_np_labels = pc_with_semantic.points[:, 3]
+                current_np_semantic = pc_with_semantic_np[:, :3]  # Convert current scan to Nx3 numpy
+                current_np_labels = pc_with_semantic_np[:, 3]
                 if prev_pcd_np_semantic is not None and current_np_semantic.shape[0] > 50:
                     T_icp_semantic = icp_align(current_np_semantic, prev_pcd_np_semantic)
                     # Apply ICP transformation
                     current_np_semantic = (T_icp_semantic[:3, :3] @ current_np_semantic.T + T_icp_semantic[:3, 3:4]).T
 
                     # Overwrite lidar_pc with ICP-aligned result
-                    current_np_semantic_combined = np.concatenate([current_np_semantic, current_np_labels], axis=1)
-                    pc_with_semantic.points = o3d.utility.Vector3dVector(current_np_semantic_combined)
-                prev_pcd_np_semantic = current_np_semantic.copy()  # Store for next ICP step
+                    pc_with_semantic_np = np.concatenate([current_np_semantic, current_np_labels], axis=1)
+                prev_pcd_np_semantic = pc_with_semantic_np.copy()  # Store for next ICP step
 
-            pc_with_semantic_np = np.asarray(pc_with_semantic.points)
             print("pc_with_semantic_np.shape:", pc_with_semantic_np.shape)
 
 
