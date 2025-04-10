@@ -2,8 +2,8 @@
 'min_density': 0.1
 'n_threads': -1
 'downsample': False
-'voxel_size': 0.5 #0.4
+'voxel_size': 0.2 #0.4 # 0.5
 'max_nn': 20
-'pc_range':  [-100, -100, -5, 100, 100, 3]
-'occ_size':  [400, 400, 16]
+'pc_range':  [-40, -40, -5, 40, 40, 3]
+'occ_size':  [400, 400, 40]
 'self_range': [1.0, 1.0, 1.0]
