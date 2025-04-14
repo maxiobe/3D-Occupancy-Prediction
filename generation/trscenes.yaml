@@ -37,7 +37,6 @@ labels:
   35: 'vehicle.ego_trailer' # new
   36: 'Unknown' # new
   37: 'Background' # new
-  38: 'Free'
 labels_16:
   0: 'noise'
   1: 'barrier'
@@ -51,7 +50,8 @@ labels_16:
   9: 'trailer'
   10: 'truck'
   # 11: 'driveable_surface'
-  11: 'animal'
+  11: 'ego_vehicle' # new
+  # 12: 'other_flat'
   12: 'traffic_sign' # new
   # 13: 'sidewalk'
   13: 'other_vehicle' # new
@@ -61,18 +61,17 @@ labels_16:
   15: 'Unknown' # new
   # 16: 'vegetation'
   16: 'Background' # new
-  17: 'Free'
 learning_map:
-  1: 11 # ?
-  5: 0 # ?
-  7: 0 # ?
-  8: 0 # ?
-  10: 0 # ?
-  11: 0 # ?
-  13: 0 # ?
-  19: 0 # ?
-  20: 0 # ?
-  0: 0 # ?
+  1: 0
+  5: 0
+  7: 0
+  8: 0
+  10: 0
+  11: 0
+  13: 0
+  19: 0
+  20: 0
+  0: 0
   # 29: 0
   # 31: 0
   9: 1
@@ -98,6 +97,6 @@ learning_map:
   32: 14
   33: 12
   34: 13
-  35: 9
+  35: 11
   36: 15
   37: 16

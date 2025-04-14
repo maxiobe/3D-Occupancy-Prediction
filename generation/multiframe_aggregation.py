@@ -403,6 +403,9 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     background_label_key = 37
     BACKGROUND_LEARNING_INDEX = learning_map.get(background_label_key, 16)
 
+    free_label_key = 38
+    FREE_LEARNING_INDEX = learning_map.get(free_label_key, 17)
+
     dict_list = []
     i = 0
     while True:
