@@ -82,7 +82,7 @@ def transform_pointwise(points: np.ndarray, transforms: np.ndarray) -> np.ndarra
 
     return points.T
 
-def get_pointwise_fused_pointcloud(trucksc: TruckScenes, sample: Dict[str, Any]) -> LidarPointCloud:
+def get_pointwise_fused_pointcloud(trucksc: TruckScenes, sample: Dict[str, Any], allowed_sensors: List[str]) -> LidarPointCloud:
     """ Returns a fused lidar point cloud for the given sample.
 
     Fuses the point clouds of the given sample and returns them in the ego
@@ -115,6 +115,9 @@ def get_pointwise_fused_pointcloud(trucksc: TruckScenes, sample: Dict[str, Any])
 
     # Iterate over all lidar sensors and fuse their point clouds
     for sensor in sample['data'].keys():
+        if sensor not in allowed_sensors:
+            print(f"Skipping sensor {sensor} as it is not allowed.")
+            continue
         if 'lidar' not in sensor.lower():
             continue
 
@@ -165,7 +168,7 @@ def get_pointwise_fused_pointcloud(trucksc: TruckScenes, sample: Dict[str, Any])
 
     return fused_point_cloud
 
-def get_rigid_fused_pointcloud(trucksc: TruckScenes, sample: Dict[str, Any]) -> LidarPointCloud:
+def get_rigid_fused_pointcloud(trucksc: TruckScenes, sample: Dict[str, Any], allowed_sensors: List[str]) -> LidarPointCloud:
     """ Returns a fused lidar point cloud for the given sample.
 
     Fuses the point clouds of the given sample and returns them in the ego
@@ -198,6 +201,9 @@ def get_rigid_fused_pointcloud(trucksc: TruckScenes, sample: Dict[str, Any]) -> 
 
     # Iterate over all lidar sensors and fuse their point clouds
     for sensor in sample['data'].keys():
+        if sensor not in allowed_sensors:
+            print(f"Skipping sensor {sensor} as it is not allowed.")
+            continue
         if 'lidar' not in sensor.lower():
             continue
 
@@ -489,9 +495,9 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         print (f"Processing frame {i}")
         ########### Load point cloud #############
         if load_mode == 'pointwise':
-            sensor_fused_pc = get_pointwise_fused_pointcloud(trucksc, my_sample)
+            sensor_fused_pc = get_pointwise_fused_pointcloud(trucksc, my_sample, allowed_sensors=sensors)
         elif load_mode == 'rigid':
-            sensor_fused_pc = get_rigid_fused_pointcloud(trucksc, my_sample)
+            sensor_fused_pc = get_rigid_fused_pointcloud(trucksc, my_sample, allowed_sensors=sensors)
         else:
             raise ValueError(f'Fusion mode {load_mode} is not supported')
 
@@ -630,7 +636,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         ################## record information into a dict  ########################
         ref_sd = trucksc.get('sample_data', my_sample['data']['LIDAR_LEFT'])
 
-        dict = {
+        frame_dict = {
             "scene_name": scene_name,
             "sample_token": my_sample['token'],
             "is_key_frame": ref_sd['is_key_frame'],
@@ -645,7 +651,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         }
 
         # append the dictionary to list
-        dict_list.append(dict)  # appends dictionary containing frame data to the list dict_list
+        dict_list.append(frame_dict)  # appends dictionary containing frame data to the list dict_list
         # After iterating through the entire scene, this list will contain information for all frames in the scene
 
         next_sample_token = my_sample['next']
@@ -655,16 +661,110 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         else:
             break
 
-    lidar_pc_list = [dict['lidar_pc'] for dict in
+    ################# concatenate all static scene points ###################################################
+    lidar_pc_list = []
+    lidar_pc_list = [frame_dict['lidar_pc'] for frame_dict in
                      dict_list]  # iterate through the list of dictionaries, extracts the static scene point cloud (lidar_pc) from each frame's dictionary
+
+    lidar_pc_with_semantic_list = []  # initialize a list to hold semantic point clouds from key frames
+    for frame_dict in dict_list:
+        lidar_pc_with_semantic_list.append(
+            frame_dict['lidar_pc_with_semantic'])  # only appends semantic point clouds from key frames to the list
+
+    if args.icp_refinement and len(lidar_pc_list) > 0:
+        print(f"Performing ICP refinement on static point clouds for scene {scene_name}")
+
+        # Configuration for ICP and map accumulation
+        icp_voxel_size = config.get('icp_voxel_size', 0.5)  # Voxel size for ICP alignment itself
+        map_voxel_size = config.get('map_voxel_size', 0.3)  # Voxel size for downsampling the accumulating map
+        print(f" ICP Voxel Size: {icp_voxel_size}, Map Accumulation Voxel Size: {map_voxel_size}")
+
+        # Initialize the accumulating target map with the first frame's points
+        accumulated_target_pcd = o3d.geometry.PointCloud()
+        print(lidar_pc_list[0].shape)
+        if lidar_pc_list[0].shape[0] > 0:  # Check if first frame has points
+            accumulated_target_pcd.points = o3d.utility.Vector3dVector(lidar_pc_list[0][:, :3])
+            accumulated_target_pcd = accumulated_target_pcd.voxel_down_sample(voxel_size=map_voxel_size)
+            print(f"Initialized accumulating map with {len(accumulated_target_pcd.points)} points from frame 0.")
+        else:
+            print("Warning: First frame has no static points, cannot initialize ICP map.")
+            # Proceed without ICP if the first frame is empty, or handle as needed
+
+        # Store refined transforms (optional, for debugging)
+        # icp_transforms = [np.eye(4)] # Transform for frame 0 is identity
+
+        # Iterate through subsequent frames to align them to the accumulating map
+        for k in range(1, len(lidar_pc_list)):
+            print(f" ICP Processing frame {k}/{len(lidar_pc_list) - 1}")
+            current_pc_np = lidar_pc_list[k][:, :3]
+
+            # Ensure we have points in the current frame and the target map
+            if current_pc_np.shape[0] == 0:
+                print(f"  Skipping ICP for frame {k}: No static points.")
+                # icp_transforms.append(np.eye(4)) # No transform needed
+                continue
+            if len(accumulated_target_pcd.points) == 0:
+                print(f"  Skipping ICP for frame {k}: Accumulated map is empty.")
+                # icp_transforms.append(np.eye(4)) # Cannot align
+                continue
+
+            source_pcd = o3d.geometry.PointCloud()
+            source_pcd.points = o3d.utility.Vector3dVector(current_pc_np)
+
+            print(
+                f"  Aligning frame {k} ({len(source_pcd.points)} pts) to map ({len(accumulated_target_pcd.points)} pts)...")
+
+            # Perform ICP alignment
+            # Use the accumulating map as target
+            # Note: icp_align function already handles voxelization internally based on its voxel_size arg
+            icp_transform = icp_align(np.asarray(source_pcd.points),
+                                      np.asarray(accumulated_target_pcd.points),
+                                      init_trans=np.eye(4),
+                                      voxel_size=icp_voxel_size)  # Use ICP-specific voxel size
+
+            # icp_transforms.append(icp_transform)
+
+            # Apply the transformation to the points of frame k
+            # Ensure we transform all features correctly, assuming first 3 are XYZ
+            num_points_k = lidar_pc_list[k].shape[0]
+            source_pc_homo = np.hstack((lidar_pc_list[k][:, :3], np.ones((num_points_k, 1))))
+            transformed_pc_homo = (icp_transform @ source_pc_homo.T).T
+            # Update the XYZ coordinates in the list
+            lidar_pc_list[k][:, :3] = transformed_pc_homo[:, :3]
+
+            # --- Apply the SAME transform to the semantic point cloud ---
+            # --- This assumes lidar_pc_with_semantic_list[k] has the exact same points/order ---
+            if lidar_pc_with_semantic_list[k].shape[0] > 0:
+                num_points_sem_k = lidar_pc_with_semantic_list[k].shape[0]
+                source_sem_homo = np.hstack(
+                    (lidar_pc_with_semantic_list[k][:, :3], np.ones((num_points_sem_k, 1))))
+                transformed_sem_homo = (icp_transform @ source_sem_homo.T).T
+                # Update the XYZ coordinates in the semantic list
+                lidar_pc_with_semantic_list[k][:, :3] = transformed_sem_homo[:, :3]
+            # --- End semantic update ---
+
+            # Add the newly aligned points to the accumulating map
+            aligned_pcd = o3d.geometry.PointCloud()
+            aligned_pcd.points = o3d.utility.Vector3dVector(transformed_pc_homo[:, :3])
+            accumulated_target_pcd += aligned_pcd  # Combine points
+
+            # Downsample the accumulated map to keep it manageable
+            accumulated_target_pcd = accumulated_target_pcd.voxel_down_sample(voxel_size=map_voxel_size)
+            print(
+                f"  Map size after adding frame {k} and downsampling: {len(accumulated_target_pcd.points)} points")
+
+        print("ICP refinement complete.\n")
+
+    elif not args.icp_refinement:
+        print("ICP refinement disabled by command-line argument.")
+    else:  # Only one frame, no ICP needed
+        print("Only one frame in the scene, skipping ICP.")
+
     lidar_pc = np.concatenate(lidar_pc_list,
                               axis=0).T  # Merge list of point clouds along the point dimension (axis=1). Transpose to switch from (3, N) to (N, 3)
     print(f"Concatenating all lidar pc from frames to pc shape {lidar_pc.shape}")
 
     ################## concatenate all semantic scene segments (only key frames)  ########################
-    lidar_pc_with_semantic_list = []  # initialize a list to hold semantic point clouds from key frames
-    for dict in dict_list:
-        lidar_pc_with_semantic_list.append(dict['lidar_pc_with_semantic'])  # only appends semantic point clouds from key frames to the list
     lidar_pc_with_semantic = np.concatenate(lidar_pc_with_semantic_list, axis=0).T  # concatenate semantic points
     print(f"Concatenating all semantic lidar pc from frames to pc shape {lidar_pc_with_semantic.shape}")
 
@@ -687,13 +787,13 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     ################## concatenate all object segments (including non-key frames)  ########################
     object_token_zoo = []  # stores unique object tokens from all frames
     object_semantic = []  # stores semantic category corresponding to each unique object
-    for dict in dict_list:  # Iterate through frames and collect unique objects
-        for i, object_token in enumerate(dict['object_tokens']):
+    for frame_dict in dict_list:  # Iterate through frames and collect unique objects
+        for i, object_token in enumerate(frame_dict['object_tokens']):
             if object_token not in object_token_zoo:  # Filter and append object tokens
-                if (dict['object_points_list'][i].shape[
+                if (frame_dict['object_points_list'][i].shape[
                     0] > 0):  # only appends objects that have at least one point
                     object_token_zoo.append(object_token)
-                    object_semantic.append(dict['converted_object_category'][i])
+                    object_semantic.append(frame_dict['converted_object_category'][i])
                 else:
                     continue
 
@@ -703,15 +803,15 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     for query_object_token in object_token_zoo:  # Loop through each unique object token
         object_points_dict[
             query_object_token] = []  # initializes an empty list for each token to store points from different frames
-        for dict in dict_list:  # iterates through all frames
-            for i, object_token in enumerate(dict['object_tokens']):
+        for frame_dict in dict_list:  # iterates through all frames
+            for i, object_token in enumerate(frame_dict['object_tokens']):
                 if query_object_token == object_token:  # find matching object tokens
-                    object_points = dict['object_points_list'][i]  # retrieve object points
+                    object_points = frame_dict['object_points_list'][i]  # retrieve object points
                     if object_points.shape[0] > 0:
-                        object_points = object_points[:, :3] - dict['gt_bbox_3d'][i][
+                        object_points = object_points[:, :3] - frame_dict['gt_bbox_3d'][i][
                                                                :3]  # translates the object points to the center of the bounding box
                         # Rotate points to align with BBox orientation
-                        rots = dict['gt_bbox_3d'][i][6]
+                        rots = frame_dict['gt_bbox_3d'][i][6]
                         Rot = Rotation.from_euler('z', -rots, degrees=False)
                         rotated_object_points = Rot.apply(
                             object_points)  # uses yaw angle from bounding box to align the points
@@ -740,9 +840,9 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         if i >= len(dict_list):  # If the frame index exceeds the number of frames in the scene exit the function
             print('finish scene!')
             return
-        dict = dict_list[i]  # retrieves dictionary corresponding to the current frame
+        frame_dict = dict_list[i]  # retrieves dictionary corresponding to the current frame
         # Only processes key frames since non-key frames do not have ground truth annotations
-        is_key_frame = dict['is_key_frame']
+        is_key_frame = frame_dict['is_key_frame']
         if not is_key_frame:  # only use key frame as GT
             i = i + 1
             continue  # skips to the next frame if not a key frame
@@ -756,7 +856,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         point_cloud_with_semantic = lidar_pc_with_semantic  # retrieves transformed semantic points with labels (N, 4): [x, y, z, label]
 
         ################## load bbox of target frame ##############
-        sample = truckscenes.get('sample', dict['sample_token'])
+        sample = truckscenes.get('sample', frame_dict['sample_token'])
         boxes = get_boxes(truckscenes, sample)
 
         locs = np.array([b.center for b in boxes]).reshape(-1, 3)
@@ -776,7 +876,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         object_points_list = []  # Final transformed points for scene
         object_semantic_list = []  # Final semantic-labeled points for scene
 
-        for j, object_token in enumerate(dict['object_tokens']):
+        for j, object_token in enumerate(frame_dict['object_tokens']):
             # Find matching object entry
             for obj in object_data:
                 if object_token == obj["token"]:
@@ -823,10 +923,13 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
         scene_points = scene_points[mask]
 
+
         if args.filter_location in ['final', 'both'] and args.filter_mode != 'none':
+            print(f"Filtering {scene_points.shape}")
             if scene_points.shape[0] > 0:
                 pcd_to_filter = o3d.geometry.PointCloud()
                 pcd_to_filter.points = o3d.utility.Vector3dVector(scene_points[:, :3])
+                print('test')
 
                 filtered_pcd, _ = denoise_pointcloud(pcd_to_filter, args.filter_mode, config, location_msg="final scene points")
                 scene_points = np.asarray(filtered_pcd.points)
@@ -942,7 +1045,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                 occupancy_grid[x, y, z] = label
 
         # Save as .npz
-        dirs = os.path.join(save_path, scene_name, dict['sample_token'])
+        dirs = os.path.join(save_path, scene_name, frame_dict['sample_token'])
         if not os.path.exists(dirs):
             os.makedirs(dirs)
 
@@ -957,7 +1060,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
         ####################################################################################
         # Save the resulting dense voxels with semantics
-        dirs = os.path.join(save_path, scene_name, dict['sample_token'])  #### Save in folder with scene name
+        dirs = os.path.join(save_path, scene_name, frame_dict['sample_token'])  #### Save in folder with scene name
         if not os.path.exists(dirs):  # create directory if does not exist
             os.makedirs(dirs)
 
@@ -993,6 +1096,8 @@ if __name__ == '__main__':
     parse.add_argument('--label_mapping', type=str, default='truckscenes.yaml') # YAML file containing label mappings, default: "truckscenes.yaml"
     parse.add_argument('--meshing', action='store_true', help='Enable meshing')
     parse.add_argument('--icp_refinement', action='store_true', help='Enable ICP refinement')
+    parse.add_argument('--icp_refinement_objects', action='store_true',
+                       help='Enable ICP refinement of canonical object segments')
     parse.add_argument('--load_mode', type=str, default='pointwise') # pointwise or rigid
     parse.add_argument('--filter_mode', type=str, default='none', choices=['none', 'sor', 'ror', 'both'],
                        help='Noise filtering method to apply before meshing')
