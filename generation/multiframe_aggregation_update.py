@@ -450,6 +450,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     load_mode = args.load_mode
     self_range = config[
         'self_range']  # Parameter in config file that specifies a range threshold for the vehicle's own points
+    object_icp_voxel_size = config.get("object_icp_voxel_size", 0.1)
 
     # sensors = ['LIDAR_LEFT', 'LIDAR_RIGHT']
     sensors = config['sensors']
@@ -797,7 +798,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                 else:
                     continue
 
-    # Aggregate object points
+    """"# Aggregate object points
     object_points_dict = {}  # initialize an empty dictionary to hold aggregated object points for each unique object token
 
     for query_object_token in object_token_zoo:  # Loop through each unique object token
@@ -820,7 +821,94 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                 else:
                     continue
         object_points_dict[query_object_token] = np.concatenate(object_points_dict[query_object_token],
-                                                                axis=0)  # Concatenate points across multiple frames to form a single object point cloud
+                                                                axis=0)  # Concatenate points across multiple frames to form a single object point cloud"""
+
+    object_points_dict = {}  # initialize an empty dictionary to hold aggregated object points
+    object_icp_voxel_size = config.get('object_icp_voxel_size', 0.1)  # Get object ICP voxel size from config
+
+    print("\nAggregating object points...")
+    for query_object_token in tqdm(object_token_zoo,
+                                   desc="Aggregating Objects"):  # Loop through each unique object token
+        canonical_segments_list = []
+        for frame_dict in dict_list:  # iterates through all frames
+            if query_object_token in frame_dict['object_tokens']:  # Check if the object exists in this frame
+                obj_idx = frame_dict['object_tokens'].index(query_object_token)  # Find its index
+                object_points = frame_dict['object_points_list'][obj_idx]  # retrieve raw object points
+
+                if object_points is not None and object_points.shape[0] > 0:
+                    # Canonicalization: Translate to center and rotate based on box yaw
+                    center = frame_dict['gt_bbox_3d'][obj_idx][:3]
+                    yaw = frame_dict['gt_bbox_3d'][obj_idx][6]
+                    translated_points = object_points[:, :3] - center  # Use only XYZ
+                    if translated_points.shape[0] > 0:
+                        Rot = Rotation.from_euler('z', -yaw, degrees=False)
+                        rotated_object_points = Rot.apply(translated_points)  # Canonical segment (N_seg, 3)
+                        if rotated_object_points.shape[0] > 0:
+                            canonical_segments_list.append(rotated_object_points)  # Add segment to the list
+
+        # Check if any segments were collected
+        if not canonical_segments_list:
+            object_points_dict[query_object_token] = np.zeros((0, 3))  # Assign empty array
+            continue  # Skip to the next object token
+
+        # Conditionally Refine the collected segments using ICP >>>
+        segments_to_concatenate = canonical_segments_list
+        if args.icp_refinement_objects and len(canonical_segments_list) > 1:
+            # print(f"  Refining object {query_object_token} ({len(canonical_segments_list)} segments) with ICP...") # Optional verbose
+
+            MIN_ICP_POINTS = 10  # Min points required for a segment to participate in ICP
+
+            # 2a. Choose reference segment (e.g., the largest)
+            segment_lengths = [len(seg) for seg in canonical_segments_list]
+            reference_idx = np.argmax(segment_lengths)
+            reference_segment = canonical_segments_list[reference_idx]
+
+            # Only proceed if reference is usable
+            if reference_segment.shape[0] >= MIN_ICP_POINTS:
+                aligned_segments_list = [reference_segment]  # Start new list with the reference
+
+                # 2b. Align other segments TO the reference
+                for i, segment in enumerate(canonical_segments_list):
+                    if i == reference_idx:
+                        continue  # Skip the reference itself
+
+                    # Align only if source segment is also usable
+                    if segment.shape[0] >= MIN_ICP_POINTS:
+                        # print(f"   Aligning segment {i} ({segment.shape[0]} pts) to reference ({reference_segment.shape[0]} pts)...") # Optional
+                        try:
+                            # Perform ICP
+                            icp_transform_obj = icp_align(
+                                segment,  # Source (N_seg, 3)
+                                reference_segment,  # Target (N_ref, 3)
+                                init_trans=np.eye(4),
+                                voxel_size=object_icp_voxel_size
+                            )
+                            # Apply transformation
+                            xyz_seg = segment
+                            xyz_seg_homo = np.hstack((xyz_seg, np.ones((xyz_seg.shape[0], 1))))
+                            transformed_homo_seg = (icp_transform_obj @ xyz_seg_homo.T).T
+                            segment_aligned = transformed_homo_seg[:, :3]
+
+                            aligned_segments_list.append(segment_aligned)  # Add ALIGNED segment
+                        except Exception as e:
+                            print(
+                                f"   ICP failed for segment {i} of object {query_object_token}: {e}. Adding UNALIGNED segment.")
+                            aligned_segments_list.append(segment)  # Add original on failure
+                    else:
+                        # Keep small segments unaligned
+                        aligned_segments_list.append(segment)
+
+                # CRUCIAL: Point to the list containing aligned segments for concatenation
+                segments_to_concatenate = aligned_segments_list
+            # else: # Optional: Handle case where reference is too small
+            # print(f"  Skipping ICP refinement for {query_object_token}: Reference segment too small.")
+            # segments_to_concatenate remains canonical_segments_list
+
+        if segments_to_concatenate:  # Final check if the list is not empty
+            object_points_dict[query_object_token] = np.concatenate(segments_to_concatenate, axis=0)
+        else:
+            object_points_dict[query_object_token] = np.zeros((0, 3))
+
 
     object_data = []  # Stores all unique objects across frames
 
