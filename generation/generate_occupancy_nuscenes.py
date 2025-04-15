@@ -603,7 +603,25 @@ def main(nusc, val_list, indice, nuscenesyaml, args, config):
         pcd_np[:, 1] = (pcd_np[:, 1] - pc_range[1]) / voxel_size
         pcd_np[:, 2] = (pcd_np[:, 2] - pc_range[2]) / voxel_size
 
-        dense_voxels_with_semantic = np.floor(pcd_np).astype(np.int) # Use flooring to convert to discrete voxel indices
+        dense_voxels_with_semantic = np.floor(pcd_np).astype(np.int32) # Use flooring to convert to discrete voxel indices
+
+        ######################## Preparing for saving ########################
+        Dx, Dy, Dz = occ_size
+        semantic_voxel_grid = np.zeros((Dx, Dy, Dz), dtype=np.uint8)
+        # Iterate through the calculated occupied voxels and their labels
+        for idx in range(dense_voxels_with_semantic.shape[0]):
+            vx = dense_voxels_with_semantic[idx, 0]
+            vy = dense_voxels_with_semantic[idx, 1]
+            vz = dense_voxels_with_semantic[idx, 2]
+            label = dense_voxels_with_semantic[idx, 3]
+
+            # Check if the voxel coordinates are within the valid grid bounds
+            if 0 <= vx < Dx and 0 <= vy < Dy and 0 <= vz < Dz:
+                semantic_voxel_grid[vx, vy, vz] = label
+            # else:
+            # Optional: Add a warning if coordinates fall outside the expected range
+            # print(f"Warning: Voxel coordinate ({vx}, {vy}, {vz}) outside grid bounds {occ_size}")
+
 
         # Save the resulting dense voxels with semantics
         #dirs = os.path.join(save_path, scene_name, dict['lidar_token']) #### Save in folder with scene name
@@ -611,20 +629,20 @@ def main(nusc, val_list, indice, nuscenesyaml, args, config):
         if not os.path.exists(dirs): # create directory if does not exist
             os.makedirs(dirs)
 
+        output_filepath_npz = os.path.join(dirs, 'labels.npz')
+
+        print(f"Saving semantic occupancy grid ({occ_size}) to {output_filepath_npz}...")
+        np.savez_compressed(output_filepath_npz, occupancy=semantic_voxel_grid)
+
         # save_path_base = dict['pc_file_name'] ### copy file_name to save_path_base
         # suffix_to_remove = '.pcd.bin' ### define suffix to remove
         # if save_path_base.endswith(suffix_to_remove):
           #  save_path_base = save_path_base[:-len(suffix_to_remove)] ### Slice off suffix
 
-        output_filepath = os.path.join(dirs, 'labels.npy') ### Generate output filepath
+        output_filepath_npy = os.path.join(dirs, 'labels.npy') ### Generate output filepath
         # Save the dense semantic voxels as a numpy file with a filename corresponding to the frame
-        print(f"Saving GT to {output_filepath}") ####
-        np.save(output_filepath, dense_voxels_with_semantic) ### saving point cloud
-        ply_output = os.path.join(dirs, 'ply_labels.ply')
-        print(f"Saving GT to {ply_output}")
-        save_ply(dense_voxels_with_semantic[:, :3],
-                 ply_output,
-                 labels=dense_voxels_with_semantic[:, 3])
+        print(f"Saving GT to {output_filepath_npy}") ####
+        np.save(output_filepath_npy, dense_voxels_with_semantic) ### saving point cloud
 
         i = i + 1
         continue # moves to the next frame for processing
