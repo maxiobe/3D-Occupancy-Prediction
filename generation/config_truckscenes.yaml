@@ -1,9 +1,27 @@
-'depth': 10
-'min_density': 0.1
-'n_threads': -1
+# Parameters for mesh generation:
+'depth': 11 # range between 8 - 11, Higher means more detail but more computation
+'min_density': 0.01  # range between 0.01 - 0.05 # Lower values keep more detail but may introduce noise
+'n_threads': -1 # otherwise 8
 'downsample': False
-'voxel_size': 0.2 #0.4 # 0.5
+
+# Parameters for Chamfer Distance
 'max_nn': 20
-'pc_range':  [-40, -40, -5, 40, 40, 3]
+
+# Voxel parameters
+'voxel_size': 0.2 #0.4 # 0.5
 'occ_size':  [400, 400, 40]
+
+# Parameters for ranges
 'self_range': [1.0, 1.0, 1.0]
+'pc_range':  [-40, -40, -5, 40, 40, 3]
+
+# Filtering parameters
+# Filtering statistical outlier removal:
+sor_nb_neighbors: 20
+sor_std_ratio: 3.0
+# Filtering radius outlier removal:
+ror_nb_points: 8
+ror_radius: 1.0
+
+# Aggregate scans over different sensors
+sensors: ['LIDAR_LEFT, LIDAR_RIGHT']
