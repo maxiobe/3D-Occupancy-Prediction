@@ -267,7 +267,7 @@ def get_boxes(trucksc: TruckScenes, sample: Dict[str, Any]) -> List[Box]:
 def run_poisson(pcd, depth, n_threads, min_density=None):
     # creates triangular mesh form pcd using poisson surface reconstruction
     mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-        pcd, depth=depth, n_threads=8
+        pcd, depth=depth, n_threads=n_threads
     )
     # returns mesh and densities: list of density values corresponding to each vertex in the mesh. Density indicates how well a vertex is supported by underlying points
 
@@ -734,18 +734,18 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
         scene_points = scene_points[mask]
 
-        print(f"Shape of scene points before meshing: {scene_points.shape}")
-
-        ################## get mesh via Possion Surface Reconstruction ##############
-        point_cloud_original = o3d.geometry.PointCloud()  # Initialize point cloud object
-        with_normal2 = o3d.geometry.PointCloud()  # Initialize point cloud object
-        point_cloud_original.points = o3d.utility.Vector3dVector(
-            scene_points[:, :3])  # converts scene_points array into open3D point cloud format
-        with_normal = preprocess(point_cloud_original, config)  # Uses the preprocess function to compute normals
-        with_normal2.points = with_normal.points  # copies the processed points and normals to another point clouds
-        with_normal2.normals = with_normal.normals  # copies the processed points and normals to another point clouds
-
         if args.meshing:
+            print(f"Shape of scene points before meshing: {scene_points.shape}")
+
+            ################## get mesh via Possion Surface Reconstruction ##############
+            point_cloud_original = o3d.geometry.PointCloud()  # Initialize point cloud object
+            with_normal2 = o3d.geometry.PointCloud()  # Initialize point cloud object
+            point_cloud_original.points = o3d.utility.Vector3dVector(
+                scene_points[:, :3])  # converts scene_points array into open3D point cloud format
+            with_normal = preprocess(point_cloud_original, config)  # Uses the preprocess function to compute normals
+            with_normal2.points = with_normal.points  # copies the processed points and normals to another point clouds
+            with_normal2.normals = with_normal.normals  # copies the processed points and normals to another point clouds
+
             print("Meshing")
             # Generate mesh from point cloud using Poisson Surface Reconstruction
             mesh, _ = create_mesh_from_map(None, config['depth'], config['n_threads'],
