@@ -1057,6 +1057,11 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             1]) / voxel_size  # point cloud range (pc_range): defines bounding box
         pcd_np[:, 2] = (pcd_np[:, 2] - pc_range[2]) / voxel_size
         pcd_np = np.floor(pcd_np).astype(int)  # Round down to nearest integer
+
+        pcd_np[:, 0] = np.clip(pcd_np[:, 0], 0, occ_size[0] - 1)
+        pcd_np[:, 1] = np.clip(pcd_np[:, 1], 0, occ_size[1] - 1)
+        pcd_np[:, 2] = np.clip(pcd_np[:, 2], 0, occ_size[2] - 1)
+
         voxel = np.zeros(occ_size)  # initialize voxel grid with zeros to represent empty voxels
         voxel[pcd_np[:, 0], pcd_np[:, 1], pcd_np[:, 2]] = 1  # marks occupied voxels as 1
 

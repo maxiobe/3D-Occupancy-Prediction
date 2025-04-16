@@ -29,5 +29,7 @@ ror_nb_points: 8
 ror_radius: 0.8
 
 # Aggregate scans over different sensors
+# sensors: ['LIDAR_LEFT']
+# sensors: ['LIDAR_RIGHT']
 # sensors: ['LIDAR_LEFT', 'LIDAR_RIGHT']
 sensors: ['LIDAR_LEFT', 'LIDAR_RIGHT', 'LIDAR_TOP_FRONT', 'LIDAR_TOP_LEFT', 'LIDAR_TOP_RIGHT', 'LIDAR_REAR']
