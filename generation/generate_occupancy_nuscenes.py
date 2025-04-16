@@ -188,6 +188,7 @@ def main(nusc, val_list, indice, nuscenesyaml, args, config):
     voxel_size = config['voxel_size'] # Size of each voxel in the occupancy grid
     pc_range = config['pc_range'] # Range of point cloud coordinates to consider (bounding box)
     occ_size = config['occ_size'] # Dimensions of the output occupancy grid
+    x_min, y_min, z_min, x_max, y_max, z_max = config['pc_range']
 
     # Retrieves a specific scene from the nuScenes dataset
     my_scene = nusc.scene[indice] # scene is selected by indice parameter
@@ -319,12 +320,12 @@ def main(nusc, val_list, indice, nuscenesyaml, args, config):
 
         ############################# get point mask of the vehicle itself ##########################
         # goal here is to filter out points that belong to the vehicle itself
-        range = config['self_range'] # Parameter in config file that specifies a range threshold for the vehicle's own points
+        self_range = config['self_range'] # Parameter in config file that specifies a range threshold for the vehicle's own points
 
         # Mask calculation: filters out points that are too close to the vehicle in x, y or z directions
-        oneself_mask = torch.from_numpy((np.abs(pc0[:, 0]) > range[0]) |
-                                        (np.abs(pc0[:, 1]) > range[1]) |
-                                        (np.abs(pc0[:, 2]) > range[2]))
+        oneself_mask = torch.from_numpy((np.abs(pc0[:, 0]) > self_range[0]) |
+                                        (np.abs(pc0[:, 1]) > self_range[1]) |
+                                        (np.abs(pc0[:, 2]) > self_range[2]))
 
         ############################# get static scene segment ##########################
         # Combine background mask and the self-filter mask using a logical AND
@@ -523,8 +524,13 @@ def main(nusc, val_list, indice, nuscenesyaml, args, config):
             scene_semantic_points = point_cloud_with_semantic # If no object points, only use static scene points
 
         ################## remain points with a spatial range ##############
-        mask = (np.abs(scene_points[:, 0]) < 50.0) & (np.abs(scene_points[:, 1]) < 50.0) \
-               & (scene_points[:, 2] > -5.0) & (scene_points[:, 2] < 3.0) # Generate mask for filtering points in x, y [-50, 50], z [-5, 3]
+        """mask = (np.abs(scene_points[:, 0]) < 50.0) & (np.abs(scene_points[:, 1]) < 50.0) \
+               & (scene_points[:, 2] > -5.0) & (scene_points[:, 2] < 3.0) # Generate mask for filtering points in x, y [-50, 50], z [-5, 3]"""
+
+        mask = (scene_points[:, 0] >= x_min) & (scene_points[:, 0] < x_max) & \
+               (scene_points[:, 1] >= y_min) & (scene_points[:, 1] < y_max) & \
+               (scene_points[:, 2] >= z_min) & (scene_points[:, 2] < z_max)
+
         scene_points = scene_points[mask] # Filter points within a spatial range
 
         ################## get mesh via Possion Surface Reconstruction ##############
@@ -541,8 +547,13 @@ def main(nusc, val_list, indice, nuscenesyaml, args, config):
         scene_points = np.asarray(mesh.vertices, dtype=float) # Converts the vertices of the mesh into a numpy array
 
         ################## remain points with a spatial range ##############
-        mask = (np.abs(scene_points[:, 0]) < 50.0) & (np.abs(scene_points[:, 1]) < 50.0) \
-               & (scene_points[:, 2] > -5.0) & (scene_points[:, 2] < 3.0) # Generate mask for filtering points in x, y [-50, 50], z [-5, 3]
+        """mask = (np.abs(scene_points[:, 0]) < 50.0) & (np.abs(scene_points[:, 1]) < 50.0) \
+               & (scene_points[:, 2] > -5.0) & (scene_points[:, 2] < 3.0) # Generate mask for filtering points in x, y [-50, 50], z [-5, 3]"""
+
+        mask = (scene_points[:, 0] >= x_min) & (scene_points[:, 0] < x_max) & \
+               (scene_points[:, 1] >= y_min) & (scene_points[:, 1] < y_max) & \
+               (scene_points[:, 2] >= z_min) & (scene_points[:, 2] < z_max)
+
         scene_points = scene_points[mask] # Filter points within a spatial range
 
         ################## convert points to voxels ##############
@@ -551,7 +562,7 @@ def main(nusc, val_list, indice, nuscenesyaml, args, config):
         pcd_np[:, 0] = (pcd_np[:, 0] - pc_range[0]) / voxel_size # voxel size: controls the granularity of voxel grid
         pcd_np[:, 1] = (pcd_np[:, 1] - pc_range[1]) / voxel_size # point cloud range (pc_range): defines bounding box
         pcd_np[:, 2] = (pcd_np[:, 2] - pc_range[2]) / voxel_size
-        pcd_np = np.floor(pcd_np).astype(np.int) # Round down to nearest integer
+        pcd_np = np.floor(pcd_np).astype(np.int32) # Round down to nearest integer
         voxel = np.zeros(occ_size) # initialize voxel grid with zeros to represent empty voxels
         voxel[pcd_np[:, 0], pcd_np[:, 1], pcd_np[:, 2]] = 1 # marks occupied voxels as 1
 
@@ -573,8 +584,13 @@ def main(nusc, val_list, indice, nuscenesyaml, args, config):
         fov_voxels[:, 2] += pc_range[2]
 
         ################## get semantics of sparse points  ##############
-        mask = (np.abs(scene_semantic_points[:, 0]) < 50.0) & (np.abs(scene_semantic_points[:, 1]) < 50.0) \
-               & (scene_semantic_points[:, 2] > -5.0) & (scene_semantic_points[:, 2] < 3.0) # Generate mask for filtering points in x, y [-50, 50], z [-5, 3]
+        """mask = (np.abs(scene_semantic_points[:, 0]) < 50.0) & (np.abs(scene_semantic_points[:, 1]) < 50.0) \
+               & (scene_semantic_points[:, 2] > -5.0) & (scene_semantic_points[:, 2] < 3.0) # Generate mask for filtering points in x, y [-50, 50], z [-5, 3]"""
+
+        mask = (scene_semantic_points[:, 0] >= x_min) & (scene_semantic_points[:, 0] < x_max) & \
+               (scene_semantic_points[:, 1] >= y_min) & (scene_semantic_points[:, 1] < y_max) & \
+               (scene_semantic_points[:, 2] >= z_min) & (scene_semantic_points[:, 2] < z_max)
+
         scene_semantic_points = scene_semantic_points[mask] # Filter points within a spatial range
 
         ################## Nearest Neighbor to assign semantics ##############
