@@ -791,15 +791,12 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         # Mask calculation: filters out points that are too close to the vehicle in x, y or z directions
 
 
-        ego_filter_mask = torch.from_numpy((np.abs(points_xyz[:, 0]) > self_range[0]) |
-                                           (np.abs(points_xyz[:, 1]) > self_range[1]) |
-                                           (np.abs(points_xyz[:, 2]) > self_range[2]))
-        """inside_x = torch.from_numpy(points_xyz[:, 0] >= x_min_self) & torch.from_numpy(points_xyz[:, 0] <= x_max_self)
+        inside_x = torch.from_numpy(points_xyz[:, 0] >= x_min_self) & torch.from_numpy(points_xyz[:, 0] <= x_max_self)
         inside_y = torch.from_numpy(points_xyz[:, 1] >= y_min_self) & torch.from_numpy(points_xyz[:, 1] <= y_max_self)
         inside_z = torch.from_numpy(points_xyz[:, 2] >= z_min_self) & torch.from_numpy(points_xyz[:, 2] <= z_max_self)
 
         inside_ego_mask = inside_x & inside_y & inside_z
-        ego_filter_mask = ~inside_ego_mask"""
+        ego_filter_mask = ~inside_ego_mask
 
         points_mask = static_mask & ego_filter_mask
 
