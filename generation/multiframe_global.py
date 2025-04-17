@@ -591,6 +591,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     load_mode = args.load_mode
     self_range = config[
         'self_range']  # Parameter in config file that specifies a range threshold for the vehicle's own points
+    x_min_self, y_min_self, z_min_self, x_max_self, y_max_self, z_max_self = self_range
     object_icp_voxel_size = config.get("object_icp_voxel_size", 0.1)
 
     # sensors = ['LIDAR_LEFT', 'LIDAR_RIGHT']
@@ -647,6 +648,34 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
         if args.vis and args.vis_position == 'fused_sensors_ego':
             visualize_pointcloud(sensor_fused_pc.points.T, title=f"Fused sensor PC in ego coordinates - Frame {i}")
+
+        """geometries_to_draw = []
+        pcd = o3d.geometry.PointCloud()
+        #points_xyz_1 = sensor_fused_pc.points.T[:, :3]
+        points_xyz_1 = sensor_fused_pc.points[:3, :].T
+        pcd.points = o3d.utility.Vector3dVector(points_xyz_1)
+        pcd.paint_uniform_color([0.0, 0.0, 1.0])
+
+        geometries_to_draw.append(pcd)
+
+        center = np.array([(x_min_self + x_max_self) / 2.0,
+                           (y_min_self + y_max_self) / 2.0,
+                           (z_min_self + z_max_self) / 2.0])
+        extent = np.array([x_max_self - x_min_self,
+                           y_max_self - y_min_self,
+                           z_max_self - z_min_self])
+        # Rotation matrix is identity since it's axis-aligned in ego frame
+        R = np.eye(3)
+
+        # Create the Open3D oriented bounding box object
+        ego_filter_o3d_bbox = o3d.geometry.OrientedBoundingBox(center, R, extent)
+        ego_filter_o3d_bbox.color = (1.0, 0.0, 0.0)  # Set color to red
+        geometries_to_draw.append(ego_filter_o3d_bbox)
+
+        o3d.visualization.draw_geometries(
+            geometries_to_draw,
+            window_name=f"Frame {i}: Fused PC & Ego Filter Box (Ego Coords)"
+        )"""
 
         ##########################################
 
@@ -760,9 +789,17 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
         # Create a mask for points outside the ego vehicle bounding box
         # Mask calculation: filters out points that are too close to the vehicle in x, y or z directions
+
+
         ego_filter_mask = torch.from_numpy((np.abs(points_xyz[:, 0]) > self_range[0]) |
-                                        (np.abs(points_xyz[:, 1]) > self_range[1]) |
-                                        (np.abs(points_xyz[:, 2]) > self_range[2]))
+                                           (np.abs(points_xyz[:, 1]) > self_range[1]) |
+                                           (np.abs(points_xyz[:, 2]) > self_range[2]))
+        """inside_x = torch.from_numpy(points_xyz[:, 0] >= x_min_self) & torch.from_numpy(points_xyz[:, 0] <= x_max_self)
+        inside_y = torch.from_numpy(points_xyz[:, 1] >= y_min_self) & torch.from_numpy(points_xyz[:, 1] <= y_max_self)
+        inside_z = torch.from_numpy(points_xyz[:, 2] >= z_min_self) & torch.from_numpy(points_xyz[:, 2] <= z_max_self)
+
+        inside_ego_mask = inside_x & inside_y & inside_z
+        ego_filter_mask = ~inside_ego_mask"""
 
         points_mask = static_mask & ego_filter_mask
 
