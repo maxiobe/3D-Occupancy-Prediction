@@ -12,7 +12,7 @@ from truckscenes.utils import splits ### Truckscenes
 from tqdm import tqdm
 from truckscenes.utils.data_classes import Box, LidarPointCloud
 from truckscenes.utils.geometry_utils import view_points ### Truckscenes
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Union
 from pyquaternion import Quaternion
 from scipy.interpolate import interp1d
 from scipy.spatial.transform import Rotation, Slerp
@@ -26,6 +26,8 @@ from functools import reduce
 
 import open3d as o3d
 from copy import deepcopy
+import matplotlib.pyplot as plt
+
 
 def transform_matrix_interp(x: np.ndarray, xp: np.ndarray, fp: np.ndarray) -> np.ndarray:
     """
@@ -437,6 +439,145 @@ def in_range_mask(points, pc_range):
         (points[:, 2] >= z_min) & (points[:, 2] <= z_max)
     )
 
+def visualize_pointcloud(points, colors=None, title="Point Cloud"):
+    """
+    Visualize a point cloud using Open3D.
+    Args:
+        points: Nx3 or Nx4 numpy array of XYZ[+label/feature].
+        colors: Optional Nx3 RGB array or a string-based colormap (e.g., "label").
+        title: Optional window title.
+    """
+    if points.shape[1] < 3:
+        print("Invalid point cloud shape:", points.shape)
+        return
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points[:, :3])
+
+    if colors is not None:
+        if isinstance(colors, str) and colors == "label" and points.shape[1] > 3:
+            labels = points[:, 3].astype(int)
+            max_label = labels.max() + 1
+            cmap = plt.get_cmap("tab20", max_label)
+            rgb = cmap(labels)[:, :3]
+            pcd.colors = o3d.utility.Vector3dVector(rgb)
+        elif isinstance(colors, np.ndarray) and colors.shape == points[:, :3].shape:
+            pcd.colors = o3d.utility.Vector3dVector(colors)
+    elif points.shape[1] > 3:
+        # Use label to colorize by default
+        labels = points[:, 3].astype(int)
+        max_label = labels.max() + 1
+        cmap = plt.get_cmap("tab20", max_label)
+        rgb = cmap(labels)[:, :3]
+        pcd.colors = o3d.utility.Vector3dVector(rgb)
+
+    print(f"Visualizing point cloud with {np.asarray(pcd.points).shape[0]} points")
+    o3d.visualization.draw_geometries([pcd], window_name=title)
+
+
+def visualize_pointcloud_bbox(points: np.ndarray,
+                              boxes: Optional[List] = None, # Use List[Box] if Box class is imported
+                              colors: Optional[Union[np.ndarray, str]] = None,
+                              title: str = "Point Cloud with BBoxes"):
+    """
+    Visualize a point cloud and optional bounding boxes using Open3D.
+
+    Args:
+        points: Nx3 or Nx(>3) numpy array of XYZ[+label/feature].
+        boxes: List of Box objects (e.g., from truckscenes) in the same coordinate frame as points.
+               Assumes Box objects have .center, .wlh, and .orientation (pyquaternion.Quaternion) attributes.
+        colors: Optional Nx3 RGB array or a string-based colormap (e.g., "label").
+                If "label", assumes the 4th column of `points` contains integer labels.
+        title: Optional window title.
+    """
+    geometries = []
+
+    # --- Point cloud ---
+    if points.ndim != 2 or points.shape[1] < 3:
+        print(f"Error: Invalid point cloud shape: {points.shape}. Needs Nx(>=3).")
+        return
+    if points.shape[0] == 0:
+        print("Warning: Point cloud is empty.")
+        # Continue to potentially draw boxes
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points[:, :3])
+
+    # --- Point Cloud Coloring ---
+    use_label_coloring = False
+    if colors is not None:
+        if isinstance(colors, str) and colors.lower() == "label":
+            if points.shape[1] > 3:
+                use_label_coloring = True
+            else:
+                print("Warning: 'colors' set to 'label' but points array has < 4 columns.")
+        elif isinstance(colors, np.ndarray) and colors.shape == points[:, :3].shape:
+             # Ensure colors are float64 and in range [0, 1] for Open3D
+             colors_float = colors.astype(np.float64)
+             if np.max(colors_float) > 1.0: # Basic check if maybe 0-255 range
+                 colors_float /= 255.0
+             pcd.colors = o3d.utility.Vector3dVector(np.clip(colors_float, 0.0, 1.0))
+        else:
+            print(f"Warning: Invalid 'colors' argument. Type: {type(colors)}, Value/Shape: {colors if isinstance(colors, str) else colors.shape}. Using default colors.")
+    elif points.shape[1] > 3: # Default to label coloring if 4th column exists and colors=None
+         print("Info: No 'colors' provided, attempting to color by 4th column (label).")
+         use_label_coloring = True
+
+    if use_label_coloring:
+        try:
+            labels = points[:, 3].astype(int)
+            unique_labels = np.unique(labels)
+            if unique_labels.size > 0:
+                # Map labels to colors
+                min_label = unique_labels.min()
+                max_label = unique_labels.max()
+                label_range = max_label - min_label + 1
+                # Use a colormap suitable for categorical data
+                cmap = plt.get_cmap("tab20", label_range)
+                # Normalize labels to 0..label_range-1 for colormap indexing
+                normalized_labels = labels - min_label
+                rgb = cmap(normalized_labels)[:, :3] # Get RGB, ignore alpha
+                pcd.colors = o3d.utility.Vector3dVector(rgb)
+            else:
+                print("Warning: Found label column, but no unique labels detected.")
+        except Exception as e:
+            print(f"Error applying label coloring: {e}. Using default colors.")
+            use_label_coloring = False # Revert if error occurred
+
+
+    geometries.append(pcd)
+
+    # --- Bounding boxes ---
+    num_boxes_drawn = 0
+    if boxes is not None:
+        for i, box in enumerate(boxes):
+            try:
+                # Create Open3D OrientedBoundingBox from truckscenes Box properties
+                center = box.center # Should be numpy array (3,)
+                # truckscenes Box.wlh = [width(y), length(x), height(z)]
+                # o3d OrientedBoundingBox extent = [length(x), width(y), height(z)]
+                extent = np.array([box.wlh[1], box.wlh[0], box.wlh[2]])
+                # Get rotation matrix from pyquaternion.Quaternion
+                R = box.orientation.rotation_matrix # Should be 3x3 numpy array
+
+                obb = o3d.geometry.OrientedBoundingBox(center, R, extent)
+                obb.color = (1.0, 0.0, 0.0)  # Set color to red
+                geometries.append(obb)
+                num_boxes_drawn += 1
+
+            except AttributeError as e:
+                print(f"Error processing box {i} (Token: {getattr(box, 'token', 'N/A')}): Missing attribute {e}. Skipping box.")
+            except Exception as e:
+                print(f"Error processing box {i} (Token: {getattr(box, 'token', 'N/A')}): {e}. Skipping box.")
+
+    # --- Visualize ---
+    if not geometries:
+        print("No geometries (point cloud or boxes) to visualize.")
+        return
+
+    point_count = np.asarray(pcd.points).shape[0]
+    print(f"Visualizing point cloud with {point_count} points and {num_boxes_drawn} boxes.")
+    o3d.visualization.draw_geometries(geometries, window_name=title)
 
 
 def main(trucksc, val_list, indice, truckscenesyaml, args, config):
@@ -503,6 +644,9 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             raise ValueError(f'Fusion mode {load_mode} is not supported')
 
         print(f"The fused sensor pc at frame {i} has the shape: {sensor_fused_pc.points.shape}")
+
+        if args.vis and args.vis_position == 'fused_sensors_ego':
+            visualize_pointcloud(sensor_fused_pc.points.T, title=f"Fused sensor PC in ego coordinates - Frame {i}")
 
         ##########################################
 
@@ -629,6 +773,10 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             num_in_box = points_in_boxes[0][:, box_idx].sum().item()
             print(f"Box {box_idx} contains {num_in_box} points")"""
 
+        if args.vis and args.vis_position == 'fused_sensors_ego_boxes_static':
+            visualize_pointcloud_bbox(pc_ego, boxes=boxes,
+                                      title=f"Fused filtered static sensor PC + BBoxes - Frame {i}")
+
         pc_with_semantic_ego = pc_with_semantic[points_mask]
         print(f"Number of semantic static points extracted: {pc_with_semantic_ego.shape}")
 
@@ -641,6 +789,9 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         # Convert to homogeneous coords
         points_homo = np.hstack((pc_ego[:, :3], np.ones((pc_ego.shape[0], 1))))
         points_global = (global_from_ego @ points_homo.T).T[:, :3]
+
+        if args.vis and args.vis_position == 'fused_sensors_global_static':
+            visualize_pointcloud(points_global, title=f"Fused sensor PC in world coordinates - Frame {i}")
 
         # If you want to preserve timestamps/features/etc., you can attach them back
         pc = np.hstack((points_global, pc_ego[:, 3:])) if pc_ego.shape[1] > 3 else points_global
@@ -740,6 +891,8 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                                       init_trans=np.eye(4),
                                       voxel_size=icp_voxel_size)  # Use ICP-specific voxel size
 
+            print(f"ICP Transform: {icp_transform}")
+
             # icp_transforms.append(icp_transform)
 
             # Apply the transformation to the points of frame k
@@ -778,9 +931,57 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     else:  # Only one frame, no ICP needed
         print("Only one frame in the scene, skipping ICP.")
 
+    """lidar_test_1_2 = np.concatenate([lidar_pc_list[0], lidar_pc_list[1]], axis=0)
+    visualize_pointcloud((lidar_pc_list[0]))
+    visualize_pointcloud(lidar_pc_list[1])
+    visualize_pointcloud(lidar_test_1_2, title="Test")"""
+
+    """if len(lidar_pc_list) >= 2:
+        print("Visualizing Frame 0 (Red) and Frame 1 (Blue) together...")
+
+        # Get the numpy arrays for the first two frames
+        # These arrays should be (N, features) shape after the ICP refinement loop
+        pc_np_0 = lidar_pc_list[0]
+        pc_np_1 = lidar_pc_list[1]
+
+        # Basic checks for valid point clouds
+        valid_pc0 = pc_np_0 is not None and pc_np_0.ndim == 2 and pc_np_0.shape[0] > 0 and pc_np_0.shape[1] >= 3
+        valid_pc1 = pc_np_1 is not None and pc_np_1.ndim == 2 and pc_np_1.shape[0] > 0 and pc_np_1.shape[1] >= 3
+
+        if valid_pc0 and valid_pc1:
+            # Create separate Open3D point cloud objects
+            pcd0 = o3d.geometry.PointCloud()
+            pcd0.points = o3d.utility.Vector3dVector(pc_np_0[:, :3])  # Use only XYZ coords
+
+            pcd1 = o3d.geometry.PointCloud()
+            pcd1.points = o3d.utility.Vector3dVector(pc_np_1[:, :3])  # Use only XYZ coords
+
+            # Assign distinct uniform colors
+            pcd0.paint_uniform_color([1.0, 0.0, 0.0])  # Frame 0 = Red
+            pcd1.paint_uniform_color([0.0, 0.0, 1.0])  # Frame 1 = Blue
+
+            # Visualize both point clouds together in the same window
+            o3d.visualization.draw_geometries(
+                [pcd0, pcd1],  # Pass a list of geometries
+                window_name=f"Frame 0 (Red - {pc_np_0.shape[0]} pts) + Frame 1 (Blue - {pc_np_1.shape[0]} pts)"
+            )
+        else:
+            print("Could not visualize Frame 0 and 1: One or both point clouds are empty or invalid.")
+            if not valid_pc0: print(f"Frame 0 shape: {pc_np_0.shape if pc_np_0 is not None else 'None'}")
+            if not valid_pc1: print(f"Frame 1 shape: {pc_np_1.shape if pc_np_1 is not None else 'None'}")
+
+    else:
+        print("Cannot visualize first two frames separately: Less than 2 frames processed.")"""
+
     lidar_pc = np.concatenate(lidar_pc_list,
                               axis=0).T  # Merge list of point clouds along the point dimension (axis=1). Transpose to switch from (3, N) to (N, 3)
     print(f"Concatenating all lidar pc from frames to pc shape {lidar_pc.shape}")
+
+    #print(lidar_pc)
+
+    if args.vis and args.vis_position == 'aggregated_frames_global_static':
+        visualize_pointcloud(lidar_pc.T, title=f"Aggregated static PC in world coordinates")
+
 
     ################## concatenate all semantic scene segments (only key frames)  ########################
     lidar_pc_with_semantic = np.concatenate(lidar_pc_with_semantic_list, axis=0).T  # concatenate semantic points
@@ -815,30 +1016,6 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                 else:
                     continue
 
-    """"# Aggregate object points
-    object_points_dict = {}  # initialize an empty dictionary to hold aggregated object points for each unique object token
-
-    for query_object_token in object_token_zoo:  # Loop through each unique object token
-        object_points_dict[
-            query_object_token] = []  # initializes an empty list for each token to store points from different frames
-        for frame_dict in dict_list:  # iterates through all frames
-            for i, object_token in enumerate(frame_dict['object_tokens']):
-                if query_object_token == object_token:  # find matching object tokens
-                    object_points = frame_dict['object_points_list'][i]  # retrieve object points
-                    if object_points.shape[0] > 0:
-                        object_points = object_points[:, :3] - frame_dict['gt_bbox_3d'][i][
-                                                               :3]  # translates the object points to the center of the bounding box
-                        # Rotate points to align with BBox orientation
-                        rots = frame_dict['gt_bbox_3d'][i][6]
-                        Rot = Rotation.from_euler('z', -rots, degrees=False)
-                        rotated_object_points = Rot.apply(
-                            object_points)  # uses yaw angle from bounding box to align the points
-                        object_points_dict[query_object_token].append(
-                            rotated_object_points)  # aggregate transformed points
-                else:
-                    continue
-        object_points_dict[query_object_token] = np.concatenate(object_points_dict[query_object_token],
-                                                                axis=0)  # Concatenate points across multiple frames to form a single object point cloud"""
 
     object_points_dict = {}  # initialize an empty dictionary to hold aggregated object points
     object_icp_voxel_size = config.get('object_icp_voxel_size', 0.1)  # Get object ICP voxel size from config
@@ -1275,6 +1452,9 @@ if __name__ == '__main__':
     parse.add_argument('--filter_location', type=str, default='none', choices=['none', 'static_agg', 'final', 'both'],
                        help='Where to apply noise filtering: none, static_agg (aggregated static), final (final scene points), or both')
     parse.add_argument('--vis', action='store_true', help='Enable visualization of intermediate point clouds')
+    parse.add_argument('--vis_position', type=str, default='fused_sensors_ego',
+                       choices=['fused_sensors_ego', 'fused_sensors_ego_boxes_static', 'fused_sensors_global_static',
+                                'aggregated_frames_global_static', 'final'], )
     args=parse.parse_args()
 
 
