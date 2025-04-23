@@ -4,6 +4,6 @@
 'downsample': False
 'voxel_size': 0.4 #0.4
 'max_nn': 20
-'pc_range':  [-40, -40, -1, 40, 40, 5.4]
+'pc_range':  [-40, -40, -3, 40, 40, 3.4]
 'occ_size':  [200, 200, 16]
 'self_range': [3.0, 3.0, 3.0]
