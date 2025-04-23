@@ -807,12 +807,26 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             num_in_box = points_in_boxes[0][:, box_idx].sum().item()
             print(f"Box {box_idx} contains {num_in_box} points")"""
 
+        pc_with_semantic_ego = pc_with_semantic[points_mask]
+        print(f"Number of semantic static points extracted: {pc_with_semantic_ego.shape}")
+
+        # Optional: Apply filtering to static points in ego frame
+        if args.filter_location in ['ego_static', 'all'] and args.filter_mode != 'none':
+            print(f"Filtering static ego points at frame {i}...")
+
+            if pc_ego.shape[0] > 0:
+                pcd_static = o3d.geometry.PointCloud()
+                pcd_static.points = o3d.utility.Vector3dVector(pc_ego[:, :3])
+                filtered_pcd_static, kept_indices = denoise_pointcloud(
+                    pcd_static, args.filter_mode, config, location_msg="static ego points"
+                )
+                pc_ego = np.asarray(filtered_pcd_static.points)
+                pc_with_semantic_ego = pc_with_semantic_ego[kept_indices]  # ✅ Only filter here
+
+
         if args.vis and args.vis_position == 'fused_sensors_ego_boxes_static':
             visualize_pointcloud_bbox(pc_ego, boxes=boxes,
                                       title=f"Fused filtered static sensor PC + BBoxes - Frame {i}")
-
-        pc_with_semantic_ego = pc_with_semantic[points_mask]
-        print(f"Number of semantic static points extracted: {pc_with_semantic_ego.shape}")
 
         # Get ego pose for this sample
         ego_pose = trucksc.getclosest('ego_pose', my_sample['timestamp'])
@@ -1021,7 +1035,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     lidar_pc_with_semantic = np.concatenate(lidar_pc_with_semantic_list, axis=0).T  # concatenate semantic points
     print(f"Concatenating all semantic lidar pc from frames to pc shape {lidar_pc_with_semantic.shape}")
 
-    if args.filter_location in ['static_agg', 'both'] and args.filter_mode != 'none':
+    if args.filter_location in ['static_agg', 'all'] and args.filter_mode != 'none':
         if lidar_pc.shape[1] > 0:
             pcd_o3d = o3d.geometry.PointCloud()
             pcd_o3d.points = o3d.utility.Vector3dVector(lidar_pc[:3, :].T)
@@ -1298,7 +1312,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
         scene_points = scene_points[mask]
 
-        if args.filter_location in ['final', 'both'] and args.filter_mode != 'none':
+        if args.filter_location in ['final', 'all'] and args.filter_mode != 'none':
             print(f"Filtering {scene_points.shape}")
             if scene_points.shape[0] > 0:
                 pcd_to_filter = o3d.geometry.PointCloud()
@@ -1483,8 +1497,8 @@ if __name__ == '__main__':
     parse.add_argument('--load_mode', type=str, default='pointwise') # pointwise or rigid
     parse.add_argument('--filter_mode', type=str, default='none', choices=['none', 'sor', 'ror', 'both'],
                        help='Noise filtering method to apply before meshing')
-    parse.add_argument('--filter_location', type=str, default='none', choices=['none', 'static_agg', 'final', 'both'],
-                       help='Where to apply noise filtering: none, static_agg (aggregated static), final (final scene points), or both')
+    parse.add_argument('--filter_location', type=str, default='none', choices=['none', 'static_agg', 'final', 'ego_static', 'all'],
+                       help='Where to apply noise filtering: none, static_agg (aggregated static), final (final scene points), or all')
     parse.add_argument('--vis', action='store_true', help='Enable visualization of intermediate point clouds')
     parse.add_argument('--vis_position', type=str, default='fused_sensors_ego',
                        choices=['fused_sensors_ego', 'fused_sensors_ego_boxes_static', 'fused_sensors_global_static',
