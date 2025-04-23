@@ -623,7 +623,11 @@ def main(nusc, val_list, indice, nuscenesyaml, args, config):
 
         ######################## Preparing for saving ########################
         Dx, Dy, Dz = occ_size
-        semantic_voxel_grid = np.zeros((Dx, Dy, Dz), dtype=np.uint8)
+        # Define the label for free/unoccupied space
+        free_label = 17
+        # Initialize the entire voxel grid with the free_label
+        semantic_voxel_grid = np.full((Dx, Dy, Dz), fill_value=free_label, dtype=np.uint8)
+
         # Iterate through the calculated occupied voxels and their labels
         for idx in range(dense_voxels_with_semantic.shape[0]):
             vx = dense_voxels_with_semantic[idx, 0]
