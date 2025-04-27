@@ -939,6 +939,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         ref_sd = trucksc.get('sample_data', my_sample['data']['LIDAR_LEFT'])
 
         frame_dict = {
+            "sample_timestamp": my_sample['timestamp'],
             "scene_name": scene_name,
             "sample_token": my_sample['token'],
             "is_key_frame": ref_sd['is_key_frame'],
@@ -946,6 +947,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             "gt_bbox_3d": gt_bbox_3d,  # BBox in current frame's ego coords
             "object_tokens": object_tokens,
             "object_points_list": object_points_list,  # Raw object points in current ego frame
+            "raw_lidar_ego": sensor_fused_pc,
             "lidar_pc_ego_i": pc_ego_i_save,  # Filtered static points in CURRENT ego frame (i)
             "lidar_pc_with_semantic_ego_i": pc_with_semantic_ego_i_save,
             # Filtered semantic static points in CURRENT ego frame (i)
@@ -1027,11 +1029,19 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     pc_global_to_draw.points = o3d.utility.Vector3dVector(pc_global_coordinates)
     o3d.visualization.draw_geometries([pc_global_to_draw])
 
+    raw_pc_list = [frame_dict['raw_lidar_ego'].points for frame_dict in dict_list]
+    print(raw_pc_list[0].shape)
+    raw_pc_draw = np.concatenate(raw_pc_list, axis=1)
+    raw_pc_to_draw = o3d.geometry.PointCloud()
+    raw_pc_coordinates = raw_pc_draw.T[:, :3]
+    raw_pc_to_draw.points = o3d.utility.Vector3dVector(raw_pc_coordinates)
+    o3d.visualization.draw_geometries([raw_pc_to_draw])
+
     # --- OPTIONAL: Get timestamps if available ---
     # Extract timestamps associated with each frame's original ego pose
     try:
         # Adjust key if needed based on your ego_pose dictionary structure
-        lidar_timestamps = [frame_dict['ego_pose']['timestamp'] for frame_dict in dict_list]
+        lidar_timestamps = [frame_dict['sample_timestamp'] for frame_dict in dict_list]
         print(f"  Extracted {len(lidar_timestamps)} timestamps.")
     except KeyError:
         print("  Timestamp key not found in ego_pose, setting lidar_timestamps to None.")
@@ -1064,7 +1074,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
         try:
             in_memory_dataset = InMemoryDataset(
-                lidar_scans=unrefined_pc_ego_ref_list,
+                lidar_scans=raw_pc_list,
                 timestamps=lidar_timestamps,
                 # Use a descriptive sequence ID, incorporating scene name if possible
                 sequence_id=f"{scene_name}_icp_run"
@@ -1100,9 +1110,9 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
                 # Basic check on returned poses
                 if not isinstance(estimated_poses_kiss, np.ndarray) or \
-                        estimated_poses_kiss.shape != (len(unrefined_pc_ego_ref_list), 4, 4):
+                        estimated_poses_kiss.shape != (len(raw_pc_list), 4, 4):
                     print(f"Error: Unexpected pose results shape {estimated_poses_kiss.shape}. "
-                          f"Expected ({len(unrefined_pc_ego_ref_list)}, 4, 4). Skipping refinement application.")
+                          f"Expected ({len(raw_pc_list)}, 4, 4). Skipping refinement application.")
                     args.icp_refinement = False  # Disable further steps
 
             except Exception as e:
@@ -1114,100 +1124,37 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         # --- 3. Apply Refined Poses to Original Point Clouds (Only if ICP succeeded) ---
         if args.icp_refinement and estimated_poses_kiss is not None:
             print("Applying refined poses from KISS-ICP...")
-            temp_refined_lidar_pc_list = []
-            temp_refined_lidar_pc_with_semantic_list = []
+            refined_lidar_pc_list = []
+            refined_lidar_pc_with_semantic_list = []
 
-            # Sanity check: Ensure number of poses matches number of scans
-            if len(estimated_poses_kiss) != len(unrefined_pc_ego_ref_list):
-                print(f"Error: Mismatch between number of poses ({len(estimated_poses_kiss)}) "
-                      f"and scans ({len(unrefined_pc_ego_ref_list)}). Skipping pose application.")
-            else:
-                transformation_successful = True  # Flag to track if all transformations worked
-                for k in range(len(unrefined_pc_ego_ref_list)):
-                    pose_k_refined = estimated_poses_kiss[k]  # Refined global pose for frame k
+            for idx, points_ego in enumerate(raw_pc_list):
+                pose = estimated_poses_kiss[idx]
+                print(f"Applying refined pose {idx}: {pose}")
 
-                    print(f"Refine pose {k}: {pose_k_refined}")
-                    # --- Transform original static points ---
-                    # Assuming original_lidar_pc_list contains arrays of shape (Features, N)
-                    original_points_k = unrefined_pc_ego_ref_list[k]
+                print(points_ego.shape)
 
-                    # Validate input array
-                    if not isinstance(original_points_k, np.ndarray) or original_points_k.ndim != 2:
-                        print(
-                            f"Warning: Frame {k} item in original_lidar_pc_list is not a 2D numpy array (shape: {getattr(original_points_k, 'shape', 'N/A')}). Skipping transformation for this frame.")
-                        temp_refined_lidar_pc_list.append(unrefined_pc_ego_ref_list[k])  # Keep original
-                        # Also skip semantic transformation for consistency for this frame k
-                        temp_refined_lidar_pc_with_semantic_list.append(unrefined_sem_pc_ego_ref_list[k])
-                        transformation_successful = False  # Mark as partially failed
-                        continue  # Skip to next frame
+                points_xyz = points_ego.T[:, :3]
+                points_homo = np.hstack((points_xyz, np.ones((points_xyz.shape[0], 1))))
+                points_transformed = (pose @ points_homo.T)[:3, :].T
 
-                    # Transpose to work with (N, Features) format
-                    original_points_k_t = original_points_k.T
+                if points_ego.shape[0] > 3:
+                    other_features = points_ego.T[:, 3:]
+                    points_transformed = np.hstack((points_transformed, other_features))
 
-                    if original_points_k_t.shape[0] > 0:  # Check if there are points
-                        points_xyz = original_points_k_t[:, :3]  # Extract XYZ (first 3 columns)
-                        points_homo = np.hstack((points_xyz, np.ones(
-                            (points_xyz.shape[0], 1))))  # Convert to homogeneous coordinates (N, 4)
+                refined_lidar_pc_list.append(points_transformed)
 
-                        # Apply transformation: P_transformed = Pose @ P_homogeneous.T
-                        # Result is (4, N) -> select XYZ -> transpose back to (N, 3)
-                        transformed_xyz = (pose_k_refined @ points_homo.T)[:3, :].T
+            for idx, points_semantic_ego in enumerate(unrefined_sem_pc_ego_list):
+                pose = estimated_poses_kiss[idx]
 
-                        # Recombine with other features (if any)
-                        if original_points_k_t.shape[1] > 3:  # If more than XYZ features exist
-                            refined_points_k_t = np.hstack((transformed_xyz, original_points_k_t[:, 3:]))
-                        else:
-                            refined_points_k_t = transformed_xyz
+                points_xyz = points_semantic_ego.T[:, :3]
+                points_homo = np.hstack((points_xyz, np.ones((points_xyz.shape[0], 1))))
+                points_transformed = (pose @ points_homo.T)[:3, :].T
 
-                        # Append transposed back to original format (Features, N)
-                        temp_refined_lidar_pc_list.append(refined_points_k_t.T)
-                    else:
-                        # If empty cloud, append the original empty array
-                        temp_refined_lidar_pc_list.append(unrefined_pc_ego_ref_list[k])
+                if points_semantic_ego.shape[0] > 3:
+                    other_features = points_semantic_ego.T[:, 3:]
+                    points_transformed = np.hstack((points_transformed, other_features))
 
-                    # --- Transform original semantic points ---
-                    # Assuming original_lidar_pc_with_semantic_list has the same structure
-                    original_sem_points_k = unrefined_sem_pc_ego_ref_list[k]
-
-                    # Validate input array
-                    if not isinstance(original_sem_points_k, np.ndarray) or original_sem_points_k.ndim != 2:
-                        print(
-                            f"Warning: Frame {k} item in original_lidar_pc_with_semantic_list is not a 2D numpy array (shape: {getattr(original_sem_points_k, 'shape', 'N/A')}). Skipping transformation for this frame.")
-                        temp_refined_lidar_pc_with_semantic_list.append(
-                            unrefined_sem_pc_ego_ref_list[k])  # Keep original
-                        # Note: Transformation might have already failed for the non-semantic list above
-                        transformation_successful = False  # Mark as partially failed
-                        continue  # Skip to next frame
-
-                    original_sem_points_k_t = original_sem_points_k.T  # (N, Features)
-
-                    if original_sem_points_k_t.shape[0] > 0:  # Check if there are points
-                        sem_points_xyz = original_sem_points_k_t[:, :3]  # Extract XYZ
-                        sem_points_homo = np.hstack((sem_points_xyz, np.ones((sem_points_xyz.shape[0], 1))))  # (N, 4)
-
-                        # Apply transformation
-                        transformed_sem_xyz = (pose_k_refined @ sem_points_homo.T)[:3, :].T  # (N, 3)
-
-                        # Recombine with labels/features (columns 3 onwards)
-                        if original_sem_points_k_t.shape[1] > 3:
-                            refined_sem_points_k_t = np.hstack((transformed_sem_xyz, original_sem_points_k_t[:, 3:]))
-                        else:
-                            refined_sem_points_k_t = transformed_sem_xyz
-
-                        # Append transposed back to original format (Features, N)
-                        temp_refined_lidar_pc_with_semantic_list.append(refined_sem_points_k_t.T)
-                    else:
-                        # If empty cloud, append the original empty array
-                        temp_refined_lidar_pc_with_semantic_list.append(unrefined_sem_pc_ego_ref_list[k])
-
-                # --- Update the main lists only if all transformations were successful ---
-                if transformation_successful:
-                    refined_lidar_pc_list = temp_refined_lidar_pc_list
-                    refined_lidar_pc_with_semantic_list = temp_refined_lidar_pc_with_semantic_list
-                    print("Finished applying refined poses.")
-                else:
-                    print("Skipping update of refined lists due to errors during transformation.")
-                    # The original refined_... lists (copies of originals) will be used later.
+                refined_lidar_pc_with_semantic_list.append(points_transformed)
 
     # --- If ICP was disabled or failed at any stage ---
     # The code continues here. The lists 'refined_lidar_pc_list' and
