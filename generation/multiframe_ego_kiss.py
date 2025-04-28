@@ -1127,18 +1127,20 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             refined_lidar_pc_list = []
             refined_lidar_pc_with_semantic_list = []
 
-            for idx, points_ego in enumerate(raw_pc_list):
+            for idx, points_ego in enumerate(unrefined_pc_ego_list):
                 pose = estimated_poses_kiss[idx]
                 print(f"Applying refined pose {idx}: {pose}")
 
                 print(points_ego.shape)
 
-                points_xyz = points_ego.T[:, :3]
+                #points_xyz = points_ego.T[:, :3]
+                points_xyz = points_ego[:, :3]
                 points_homo = np.hstack((points_xyz, np.ones((points_xyz.shape[0], 1))))
                 points_transformed = (pose @ points_homo.T)[:3, :].T
 
-                if points_ego.shape[0] > 3:
-                    other_features = points_ego.T[:, 3:]
+                if points_ego.shape[1] > 3:
+                    #other_features = points_ego.T[:, 3:]
+                    other_features = points_ego[:, 3:]
                     points_transformed = np.hstack((points_transformed, other_features))
 
                 refined_lidar_pc_list.append(points_transformed)
