@@ -39,24 +39,29 @@ def visualize_object_data(data_directory):
     # --- Define File Paths ---
     bbox_file = os.path.join(data_directory, 'frame_0_gt_bbox_3d.npy')
     obj_pts_file = os.path.join(data_directory, 'frame_0_temp_points.npy')
+    obj_sem_pts_file = os.path.join(data_directory, 'frame_0_sem_temp_points.npy')
 
     # --- Load Data ---
     object_points = np.empty((0, 3))
+    object_labels = np.empty((0, 1), dtype=int)
     gt_bboxes_data_original = np.empty((0, 7)) # Store original loaded boxes here
 
     # Load Object Points
     try:
-        loaded_obj = np.load(obj_pts_file)
-        if loaded_obj.ndim == 2 and loaded_obj.shape[1] >= 3:
-            object_points = loaded_obj[:, :3]
-            print(f"Loaded object points: {object_points.shape}")
+        # loaded_obj = np.load(obj_pts_file)
+        # Assuming format is [x, y, z, label] -> Nx4
+        loaded_obj_sem = np.load(obj_sem_pts_file)
+        if loaded_obj_sem.ndim == 2 and loaded_obj_sem.shape[1] >= 4:
+            object_points = loaded_obj_sem[:, :3]
+            # Ensure labels are integers and have shape (N, 1)
+            object_labels = loaded_obj_sem[:, 3].astype(int).reshape(-1, 1)
+            print(f"Loaded object points: {object_points.shape}, labels: {object_labels.shape}")
         else:
-            print(f"Warning: Object points file {obj_pts_file} has unexpected shape {loaded_obj.shape}. Cannot visualize points.")
-            object_points = np.empty((0, 3))
+            print(f"Warning: Object semantic points file {obj_sem_pts_file} has unexpected shape {loaded_obj_sem.shape}. Expected Nx4.")
     except FileNotFoundError:
-        print(f"Warning: Object points file not found at {obj_pts_file}.")
+        print(f"Warning: Object semantic points file not found at {obj_sem_pts_file}.")
     except Exception as e:
-        print(f"Error loading object points {obj_pts_file}: {e}")
+        print(f"Error loading object semantic points {obj_sem_pts_file}: {e}")
 
     # Load ORIGINAL Bounding Boxes
     try:
@@ -81,7 +86,8 @@ def visualize_object_data(data_directory):
     pcd = o3d.geometry.PointCloud()
     if object_points.shape[0] > 0:
         pcd.points = o3d.utility.Vector3dVector(object_points)
-        colors = np.tile([1.0, 0.0, 0.0], (object_points.shape[0], 1))  # Red
+        colors = np.array([CLASS_COLOR_MAP.get(label[0], DEFAULT_COLOR) for label in object_labels], dtype=np.float32)
+        # colors = np.tile([1.0, 0.0, 0.0], (object_points.shape[0], 1))  # Red
         pcd.colors = o3d.utility.Vector3dVector(colors)
         print(f"Created point cloud geometry with {object_points.shape[0]} points.")
     else:
