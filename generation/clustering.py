@@ -3,6 +3,8 @@ import open3d as o3d
 import os
 from collections import defaultdict, Counter # Make sure Counter is imported
 import scipy.stats # Make sure scipy is imported
+from sklearn.mixture import GaussianMixture
+from sklearn.cluster import KMeans, DBSCAN
 
 # Define class colormap (provided by user)
 CLASS_COLOR_MAP = {
@@ -27,6 +29,300 @@ CLASS_COLOR_MAP = {
 # Add a default color for labels not in the map
 DEFAULT_COLOR = [0.5, 0.5, 0.5] # Medium gray
 OVERLAP_COLOR = [1.0, 0.1, 0.7] # Bright Pink for overlapping points
+
+def assign_label_by_local_dbscan(
+    overlap_indices,
+    point_to_boxes,
+    points,
+    original_labels, # Need original labels for mapping heuristic
+    current_labels,
+    # --- DBSCAN Parameters (CRITICAL TO TUNE!) ---
+    eps=0.2,         # Max distance between samples for neighborhood
+    min_samples=10   # Min points to form a core point
+):
+    """
+    Assigns points in PAIRWISE overlaps using local DBSCAN.
+    Maps DBSCAN clusters back to semantic labels based on majority original label.
+    Points in overlaps involving 3+ boxes or marked as noise by DBSCAN keep original labels.
+    """
+    print(f"Applying disambiguation: Local DBSCAN (Pairwise Overlaps, eps={eps}, min_samples={min_samples})")
+    new_labels = current_labels.copy() # Start with current labels (which should be original)
+
+    # --- 1. Group points by the PAIR of boxes they overlap ---
+    print("Grouping points by overlapping box pairs...")
+    overlap_pairs_to_points = defaultdict(list)
+    points_in_higher_overlaps = set()
+
+    for point_idx in overlap_indices:
+        overlapping_box_indices = sorted(point_to_boxes.get(point_idx, []))
+        num_overlaps = len(overlapping_box_indices)
+
+        if num_overlaps == 2:
+            box_pair_key = tuple(overlapping_box_indices)
+            overlap_pairs_to_points[box_pair_key].append(point_idx)
+        elif num_overlaps > 2:
+            points_in_higher_overlaps.add(point_idx)
+
+    print(f"Found {len(overlap_pairs_to_points)} distinct pairwise overlap zones.")
+    if points_in_higher_overlaps:
+        print(f"Note: {len(points_in_higher_overlaps)} points are in overlaps of 3+ boxes and will keep original labels.")
+
+    # --- 2. Process each pairwise overlap zone ---
+    print("Running DBSCAN locally on pairwise overlaps...")
+    processed_point_count = 0
+    noise_point_count = 0
+
+    for box_pair, point_indices_in_overlap in overlap_pairs_to_points.items():
+        # Need enough points for DBSCAN to potentially form clusters
+        if len(point_indices_in_overlap) < min_samples:
+             continue
+
+        overlap_points_coords = points[point_indices_in_overlap]
+        np_point_indices_in_overlap = np.array(point_indices_in_overlap) # NumPy array for easier indexing
+
+        # --- Run DBSCAN ---
+        try:
+            dbscan = DBSCAN(eps=eps, min_samples=min_samples, n_jobs=-1) # n_jobs=-1 uses all CPU cores
+            # Labels are -1 (noise), 0, 1, 2, ...
+            point_cluster_labels = dbscan.fit_predict(overlap_points_coords)
+        except Exception as e:
+            print(f"Warning: DBSCAN failed for overlap between boxes {box_pair[0]} & {box_pair[1]}: {e}")
+            continue # Keep original labels for points in this overlap
+
+        # --- Map DBSCAN clusters (>=0) back using majority original label ---
+        unique_dbscan_labels = np.unique(point_cluster_labels)
+
+        for dbscan_label in unique_dbscan_labels:
+            if dbscan_label == -1:
+                # Handle noise points - keep original labels (already in new_labels)
+                noise_mask = (point_cluster_labels == -1)
+                noise_point_count += np.sum(noise_mask)
+                continue # Go to next dbscan label
+
+            # Find original indices for points in this DBSCAN cluster
+            current_dbscan_cluster_mask = (point_cluster_labels == dbscan_label)
+            original_indices_in_cluster = np_point_indices_in_overlap[current_dbscan_cluster_mask]
+
+            if len(original_indices_in_cluster) == 0: continue # Skip empty clusters if they somehow occur
+
+            # Get the ORIGINAL semantic labels of points in this DBSCAN cluster
+            original_semantic_labels = original_labels[original_indices_in_cluster].flatten()
+
+            # Find the most frequent original label within this DBSCAN cluster
+            try:
+                mode_result = scipy.stats.mode(original_semantic_labels)
+                if mode_result.count == 0 : # Handle case where mode is undefined (e.g., empty input)
+                     print(f"Warning: Could not find mode label for DBSCAN cluster {dbscan_label} in overlap {box_pair}. Keeping original labels.")
+                     continue
+
+                # scipy.stats.mode returns mode array and count array even for single mode
+                majority_label = mode_result.mode[0] if isinstance(mode_result.mode, np.ndarray) else mode_result.mode
+
+
+            except Exception as e:
+                 print(f"Warning: Error finding mode label for DBSCAN cluster {dbscan_label} in overlap {box_pair}: {e}. Keeping original labels.")
+                 continue # Skip assignment for this cluster
+
+            # Assign this majority label to all points originally indexed in this cluster
+            new_labels[original_indices_in_cluster] = majority_label
+            processed_point_count += len(original_indices_in_cluster)
+
+    print(f"Finished Local DBSCAN: Processed {processed_point_count} points in clusters, {noise_point_count} noise points kept original label.")
+    return new_labels
+
+def assign_label_by_local_kmeans(
+    overlap_indices,
+    point_to_boxes,
+    points,
+    boxes_data,     # Need original box data for centers
+    box_labels,     # Map box index to class label
+    current_labels
+):
+    """
+    Assigns points in PAIRWISE overlaps using local K-Means (K=2).
+    Points in overlaps involving 3+ boxes are ignored by this strategy.
+    """
+    print("Applying disambiguation: Local K-Means (Pairwise Overlaps, K=2)")
+    new_labels = current_labels.copy()
+
+    # --- 1. Group points by the PAIR of boxes they overlap ---
+    print("Grouping points by overlapping box pairs...")
+    overlap_pairs_to_points = defaultdict(list)
+    points_in_higher_overlaps = set() # Keep track of points in 3+ overlaps
+
+    for point_idx in overlap_indices:
+        overlapping_box_indices = sorted(point_to_boxes.get(point_idx, [])) # Sort for consistent key
+        num_overlaps = len(overlapping_box_indices)
+
+        if num_overlaps == 2:
+            box_pair_key = tuple(overlapping_box_indices) # Use tuple as dict key
+            overlap_pairs_to_points[box_pair_key].append(point_idx)
+        elif num_overlaps > 2:
+            points_in_higher_overlaps.add(point_idx)
+
+    print(f"Found {len(overlap_pairs_to_points)} distinct pairwise overlap zones.")
+    if points_in_higher_overlaps:
+        print(f"Note: {len(points_in_higher_overlaps)} points are in overlaps of 3+ boxes and will keep original labels.")
+
+    # --- 2. Process each pairwise overlap zone ---
+    print("Running K-Means locally on pairwise overlaps...")
+    processed_point_count = 0
+    for box_pair, point_indices_in_overlap in overlap_pairs_to_points.items():
+        if len(point_indices_in_overlap) < 2: # Need at least 2 points for K=2
+             continue
+
+        box1_idx, box2_idx = box_pair
+        overlap_points_coords = points[point_indices_in_overlap]
+
+        # --- Run K-Means ---
+        try:
+            # n_init='auto' or 10 recommended for stability
+            kmeans = KMeans(n_clusters=2, random_state=0, n_init=10, verbose=0)
+            point_cluster_labels = kmeans.fit_predict(overlap_points_coords) # Labels are 0 or 1
+            cluster_centers = kmeans.cluster_centers_ # Centroids of the two K-Means clusters
+        except Exception as e:
+            print(f"Warning: K-Means failed for overlap between boxes {box1_idx} & {box2_idx}: {e}")
+            continue # Keep original labels for points in this overlap
+
+        # --- Map K-Means clusters (0, 1) back to original box labels ---
+        # Use geometric centers of the original boxes
+        if box1_idx >= len(boxes_data) or box2_idx >= len(boxes_data):
+            print(f"Warning: Box index out of bounds for boxes {box1_idx} or {box2_idx}. Skipping assignment.")
+            continue
+        box1_center = boxes_data[box1_idx, 0:3]
+        box2_center = boxes_data[box2_idx, 0:3]
+
+        # Distances: K-Means cluster center 0 to Box 1/2 centers
+        dist_c0_b1 = np.linalg.norm(cluster_centers[0] - box1_center)
+        dist_c0_b2 = np.linalg.norm(cluster_centers[0] - box2_center)
+        # Distances: K-Means cluster center 1 to Box 1/2 centers
+        dist_c1_b1 = np.linalg.norm(cluster_centers[1] - box1_center)
+        dist_c1_b2 = np.linalg.norm(cluster_centers[1] - box2_center)
+
+        # Assign K-Means cluster 0 to the closer box center's label
+        if dist_c0_b1 < dist_c0_b2:
+            map_cluster0_to_label = box_labels[box1_idx]
+            map_cluster1_to_label = box_labels[box2_idx] # Cluster 1 gets the other label
+            # Sanity check: ensure cluster 1 is closer to box 2 (usually holds)
+            # if dist_c1_b2 > dist_c1_b1:
+            #     print(f" Info: K-Means cluster mapping sanity check passed for boxes {box_pair}")
+        elif dist_c0_b2 < dist_c0_b1:
+            map_cluster0_to_label = box_labels[box2_idx]
+            map_cluster1_to_label = box_labels[box1_idx] # Cluster 1 gets the other label
+             # Sanity check: ensure cluster 1 is closer to box 1 (usually holds)
+            # if dist_c1_b1 > dist_c1_b2:
+            #      print(f" Info: K-Means cluster mapping sanity check passed for boxes {box_pair}")
+        else:
+            # Tie in distance for cluster 0 - ambiguous mapping. Keep original labels for this group.
+            print(f"Warning: K-Means cluster 0 equidistant to box centers {box1_idx} & {box2_idx}. Keeping original labels.")
+            continue # Skip assignment for this overlap pair
+
+        # --- Assign final labels to points based on K-Means results ---
+        for i, point_idx in enumerate(point_indices_in_overlap):
+            kmeans_label = point_cluster_labels[i]
+            if kmeans_label == 0:
+                new_labels[point_idx] = map_cluster0_to_label
+            else: # kmeans_label == 1
+                new_labels[point_idx] = map_cluster1_to_label
+            processed_point_count += 1
+
+    print(f"Finished Local K-Means: Processed {processed_point_count} points in pairwise overlaps.")
+    return new_labels
+
+def assign_label_by_gmm(
+    overlap_indices,
+    point_to_boxes,
+    points,
+    original_labels, # Use original labels to find training data
+    point_counts,    # Use counts to identify non-overlapping points
+    box_labels,      # Map box index to class label
+    n_components=1,  # Number of Gaussian components per class GMM
+    min_points_for_train=50 # Minimum non-overlapping points needed to train a GMM
+):
+    """
+    Assigns overlapping points based on the highest likelihood from class-specific GMMs
+    trained on non-overlapping points.
+    """
+    print(f"Applying disambiguation: GMM (n_components={n_components})")
+    new_labels = original_labels.copy() # Start with original labels
+
+    # --- 1. Train GMMs for relevant classes ---
+    print("Training GMMs...")
+    class_gmms = {}
+    # Find all unique labels associated with the actual boxes present
+    unique_box_cls_labels = np.unique(box_labels)
+
+    for cls_label in unique_box_cls_labels:
+        if cls_label == 0: continue # Skip noise/background if necessary
+
+        # Find indices of points ORIGINALLY labeled as this class AND are NON-OVERLAPPING
+        # Non-overlapping means they fell into exactly one box (point_counts == 1)
+        train_indices = np.where(
+            (original_labels.flatten() == cls_label) & (point_counts == 1)
+        )[0]
+
+        if len(train_indices) >= min_points_for_train:
+            print(f"  Training GMM for class {cls_label} with {len(train_indices)} non-overlapping points...")
+            points_for_gmm = points[train_indices]
+
+            try:
+                # covariance_type='full' allows ellipsoids, 'diag' forces axis-aligned
+                gmm = GaussianMixture(n_components=n_components, random_state=0,
+                                      covariance_type='full', reg_covar=1e-6) # reg_covar avoids singular matrices
+                gmm.fit(points_for_gmm)
+                class_gmms[cls_label] = gmm
+            except Exception as e:
+                print(f"  Warning: Failed to train GMM for class {cls_label}: {e}")
+        else:
+            print(f"  Skipping GMM for class {cls_label} - insufficient non-overlapping points ({len(train_indices)} < {min_points_for_train}).")
+
+    if not class_gmms:
+        print("Warning: No GMMs were successfully trained. Returning original labels.")
+        return new_labels
+
+    # --- 2. Assign overlapping points based on highest likelihood ---
+    print("Assigning overlapping points using trained GMMs...")
+    assigned_count = 0
+    failed_count = 0
+    for point_idx in overlap_indices:
+        point_coord = points[point_idx].reshape(1, -1) # Needs shape (1, 3) for score_samples
+
+        # Identify candidate classes based on the boxes this point overlaps with
+        overlapping_box_indices = point_to_boxes.get(point_idx, [])
+        if not overlapping_box_indices:
+             failed_count += 1
+             continue # Should not happen if point_to_boxes is built correctly
+
+        # Get unique class labels for these specific overlapping boxes
+        candidate_labels = set(box_labels[box_idx] for box_idx in overlapping_box_indices if box_idx < len(box_labels))
+
+        max_log_likelihood = -np.inf
+        best_label = -1 # Default invalid label
+        found_candidate = False
+
+        for label in candidate_labels:
+            if label in class_gmms: # Check if we successfully trained a GMM for this candidate
+                try:
+                    log_likelihood = class_gmms[label].score_samples(point_coord)[0]
+                    if log_likelihood > max_log_likelihood:
+                        max_log_likelihood = log_likelihood
+                        best_label = label
+                        found_candidate = True
+                except Exception as e:
+                    print(f"Warning: Error scoring point {point_idx} with GMM for label {label}: {e}")
+
+        # Assign the best label found, otherwise keep the original
+        if found_candidate and best_label != -1:
+            new_labels[point_idx] = best_label
+            assigned_count += 1
+        else:
+            # Keep original label if no suitable GMM candidate found or scoring failed
+             failed_count += 1
+            # Optionally: Assign an 'ambiguous' label here instead
+            # new_labels[point_idx] = AMBIGUOUS_LABEL
+
+    print(f"Finished GMM assignment: {assigned_count} points reassigned, {failed_count} kept original label due to issues.")
+    return new_labels
 
 def assign_label_by_nearest_center(
     overlap_indices, point_to_boxes, points, boxes_data, box_labels, current_labels
@@ -550,9 +846,37 @@ def visualize_object_data_refined(data_directory, strategy=None): # Removed high
                     overlapping_point_indices, point_counts, object_points,
                     final_point_labels # Pass current labels
                 )
-            # Add elif for other strategies like 'gmm' here
-            # elif strategy == 'gmm':
-            #     final_point_labels = assign_label_by_gmm(...)
+
+            elif strategy == 'gmm':
+                final_point_labels = assign_label_by_gmm(
+                    overlap_indices=overlapping_point_indices,
+                    point_to_boxes=point_to_overlapping_boxes,
+                    points=object_points,
+                    original_labels=original_point_labels,  # Pass original labels for training GMM
+                    point_counts=point_counts,  # Pass counts to find non-overlapping
+                    box_labels=gt_box_labels,  # Pass box labels map
+                    n_components=1  # Start with 1 component per class
+                )
+
+            elif strategy == 'local_kmeans':
+                final_point_labels = assign_label_by_local_kmeans(
+                    overlap_indices=overlapping_point_indices,
+                    point_to_boxes=point_to_overlapping_boxes,
+                    points=object_points,
+                    boxes_data=gt_bboxes_data_original,  # Use ORIGINAL centers for mapping
+                    box_labels=gt_box_labels,
+                    current_labels=final_point_labels
+                )
+            elif strategy == 'local_dbscan':
+                final_point_labels = assign_label_by_local_dbscan(
+                    overlap_indices=overlapping_point_indices,
+                    point_to_boxes=point_to_overlapping_boxes,
+                    points=object_points,
+                    original_labels=original_point_labels,  # Needed for mapping heuristic
+                    current_labels=final_point_labels,
+                    eps=0.2,  # Example: Tune this based on point density/scale (e.g., 0.1, 0.3, 0.5)
+                    min_samples=15  # Example: Tune this (e.g., 5, 10, 20)
+                )
             else:
                 print(f"Warning: Unknown strategy '{strategy}'. No disambiguation applied.")
 
@@ -634,9 +958,12 @@ if __name__ == "__main__":
         # Set to None to just show original point colors and labeled boxes
         # Set to 'highlight' to show overlaps in pink
         # Set to a strategy name to apply it and show the results
-        # SELECTED_STRATEGY = 'highlight'  # <-- CHANGE THIS TO TEST STRATEGIES
+        # SELECTED_STRATEGY = 'highlight'
         # SELECTED_STRATEGY = 'nearest_center'
         # SELECTED_STRATEGY = 'knn_majority'
-        SELECTED_STRATEGY = 'nearest_surface'
+        # SELECTED_STRATEGY = 'nearest_surface'
+        # SELECTED_STRATEGY = 'gmm'
+        # SELECTED_STRATEGY = 'local_kmeans'
+        SELECTED_STRATEGY = 'local_dbscan'
 
         visualize_object_data_refined(DATA_DIR, strategy=SELECTED_STRATEGY)
