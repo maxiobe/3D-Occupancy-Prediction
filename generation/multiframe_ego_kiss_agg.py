@@ -704,6 +704,8 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
         print(f"The fused sensor pc at frame {i} has the shape: {sensor_fused_pc.points.shape}")
 
+        # visualize_pointcloud(sensor_fused_pc.points.T, title=f"Fused sensor PC in ego coordinates - Frame {i}")
+
         if args.vis and args.vis_position == 'fused_sensors_ego':
             visualize_pointcloud(sensor_fused_pc.points.T, title=f"Fused sensor PC in ego coordinates - Frame {i}")
 
@@ -1170,7 +1172,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         [1.0, 0.0, 0.0],  # Red for frame 1
         [0.0, 0.0, 1.0]  # Blue for frame 25
     ]
-    scene_name = "Comparison frames"  # Replace with actual scene name
+    scene_name_visu = "Comparison frames"  # Replace with actual scene name
 
     # Check if the list is long enough
     if len(refined_lidar_pc_list) <= max(frame_indices_to_viz):
@@ -1465,6 +1467,72 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         rots = np.array([b.orientation.yaw_pitch_roll[0] for b in boxes]).reshape(-1, 1)
 
         gt_bbox_3d = np.concatenate([locs, dims, rots], axis=1).astype(np.float32)
+
+        boxes_token = [box.token for box in boxes]  # retrieves a list of tokens from the bounding box
+        # Extract object tokens. Each instance token represents a unique object
+
+        # Extract object tokens. Each instance token represents a unique object
+        object_tokens = [truckscenes.get('sample_annotation', box_token)['instance_token'] for box_token in
+                         boxes_token]  # Uses sample_annotation data to get instance_token fore each bb
+        # Extract object categories
+        object_category = [truckscenes.get('sample_annotation', box_token)['category_name'] for box_token in
+                           boxes_token]  # retrieves category name for each bounding box
+
+        ############################# get object categories ##########################
+        converted_object_category = []  # Initialize empty list
+
+        # Iterate over each object category extracted earlier
+        for category in object_category:
+            found_match = False
+            # Iterate over label mappings defined in truckscenes.yaml file
+            for label_key, label_name_in_yaml in truckscenesyaml['labels'].items():
+                # Check category and map to learning label
+                if category == label_name_in_yaml:
+                    mapped_label_index = learning_map.get(label_key)
+                    if mapped_label_index is not None:
+                        converted_object_category.append(mapped_label_index)
+                        found_match = True
+                        break  # Found the mapping, move to the next category
+                    else:
+                        # This case means label_key exists in 'labels' but not 'learning_map'
+                        print(
+                            f"Warning: Category '{category}' mapped to label_key '{label_key}', but '{label_key}' not found in learning_map. Using 'Unknown' label.")
+                        # --- CHANGE: Use UNKNOWN_LEARNING_INDEX ---
+                        converted_object_category.append(UNKNOWN_LEARNING_INDEX)
+                        found_match = True
+                        break
+
+            # If the category was not found in the truckscenesyaml['labels'] mapping at all
+            if not found_match:
+                print(
+                    f"Warning: Category '{category}' not found in truckscenes.yaml mapping. Using 'Unknown' label.")
+                # --- CHANGE: Use UNKNOWN_LEARNING_INDEX ---
+                converted_object_category.append(UNKNOWN_LEARNING_INDEX)
+
+        labels_array = np.array(converted_object_category).reshape(-1, 1)
+
+        # Check if the number of labels matches the number of boxes
+        if locs.shape[0] == labels_array.shape[0]:
+            # Concatenate geometric data AND the labels array
+            # Resulting shape will be (N, 3+3+1+1) = (N, 8)
+            gt_bbox_3d_with_labels = np.concatenate([locs, dims, rots, labels_array], axis=1).astype(np.float32)
+
+            # ---- EXPORT gt_bbox_3d (derived from boxes) ----
+            # Create a unique filename using the frame index 'i'
+            gt_bbox_filename = f'frame_{i}_gt_bbox_3d_labeled.npy'
+            dirs = os.path.join(save_path, scene_name, frame_dict['sample_token'])  #### Save in folder with scene name
+            if not os.path.exists(dirs):  # create directory if does not exist
+                os.makedirs(dirs)
+            output_filepath_bbox = os.path.join(dirs, gt_bbox_filename)
+            np.save(output_filepath_bbox, gt_bbox_3d_with_labels)
+            print(f"Saved bounding box data for frame {i} to {output_filepath_bbox}")
+            print(f"Saved array shape: {gt_bbox_3d_with_labels.shape}")
+        else:
+            print(
+                f"ERROR: Mismatch between number of boxes ({locs.shape[0]}) and number of labels ({labels_array.shape[0]}) for frame {i}. Skipping save.")
+
+            # ------------------------------------------------
+
         gt_bbox_3d[:, 6] += np.pi / 2.
         gt_bbox_3d[:, 2] -= dims[:, 2] / 2.
         gt_bbox_3d[:, 2] -= 0.1
@@ -1512,9 +1580,21 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
                     break  # No need to check further once matched
 
+        temp_points_filename = f'frame_{i}_temp_points.npy'
+        sem_temp_points_filename = f'frame_{i}_sem_temp_points.npy'
+        dirs = os.path.join(save_path, scene_name, frame_dict['sample_token'])  #### Save in folder with scene name
+        if not os.path.exists(dirs):  # create directory if does not exist
+            os.makedirs(dirs)
+        output_filepath_temp = os.path.join(dirs, temp_points_filename)
+        output_filepath_sem_temp = os.path.join(dirs, sem_temp_points_filename)
         # Combine Scene Points with Object Points
         try:  # avoid concatenate an empty array
             temp = np.concatenate(object_points_list)
+
+            # ---- EXPORT temp points ----
+            np.save(output_filepath_temp, temp)
+            print(f"Saved temp object points for frame {i} to {output_filepath_temp}")
+            # ----------------------------
             # scene_points = point_cloud.T
             scene_points = np.concatenate(
                 [point_cloud.T, temp])  # Merge static scene points and object points
@@ -1522,6 +1602,10 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             scene_points = point_cloud  # If no object points, only use static scene points
         try:
             temp = np.concatenate(object_semantic_list)
+            # ---- EXPORT temp points ----
+            np.save(output_filepath_sem_temp, temp)
+            print(f"Saved temp object points for frame {i} to {output_filepath_sem_temp}")
+            # ----------------------------
             # scene_semantic_points = point_cloud_with_semantic.T
             scene_semantic_points = np.concatenate(
                 [point_cloud_with_semantic.T, temp])  # Merge semantic points from objects and static scenes
