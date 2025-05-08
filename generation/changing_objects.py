@@ -1,3 +1,5 @@
+#from tkinter import Image
+from PIL import Image
 from truckscenes import TruckScenes
 from truckscenes.utils.data_classes import Box, LidarPointCloud
 import numpy as np
@@ -9,6 +11,9 @@ import os.path as osp
 from scipy.interpolate import interp1d
 from scipy.spatial.transform import Rotation, Slerp
 from truckscenes.utils.geometry_utils import transform_matrix, points_in_box
+from collections import defaultdict
+import os
+import cv2
 
 def visualize_pointcloud_bbox(points: np.ndarray,
                               gt_boxes, # Use List[Box] if Box class is imported
@@ -274,6 +279,131 @@ def get_pointwise_fused_pointcloud(trucksc: TruckScenes, sample: Dict[str, Any],
 
     return fused_point_cloud
 
+def track_box_dimensions(trucksc: 'TruckScenes', scene_index: int = 0, precision: int = 4):
+    """
+    Tracks the dimensions of object bounding boxes across all samples in a scene
+    and reports if they change for any object instance.
+
+    Args:
+        trucksc: Initialized TruckScenes dataset instance.
+        scene_index: Index of the scene to analyze.
+        precision: Number of decimal places to round dimensions to for comparison.
+                   This helps ignore tiny floating-point variations.
+    """
+    if not trucksc.scene or scene_index >= len(trucksc.scene):
+        print(f"Error: Scene index {scene_index} is out of bounds (max: {len(trucksc.scene)-1}).")
+        return
+
+    my_scene = trucksc.scene[scene_index]
+    scene_name = my_scene['name']
+    print(f"\n--- Analyzing Scene: '{scene_name}' (Index: {scene_index}) for Dimension Changes ---")
+
+    # Use defaultdict for easier handling of new instance tokens
+    # Stores {instance_token: list of (timestamp, (w, l, h))}
+    tracked_dimensions = defaultdict(list)
+
+    current_sample_token = my_scene.get('first_sample_token')
+    sample_count = 0
+
+    if not current_sample_token:
+        print(f"Scene '{scene_name}' has no samples.")
+        return
+
+    while current_sample_token:
+        my_sample = trucksc.get('sample', current_sample_token)
+        timestamp = my_sample['timestamp']
+        sample_count += 1
+        # print(f"Processing Sample {sample_count}, Token: {current_sample_token}, Timestamp: {timestamp}") # Optional: progress indicator
+
+        # Get boxes (already transformed to ego frame by get_boxes, but wlh is intrinsic)
+        boxes = get_boxes(trucksc, my_sample) # Use the provided get_boxes function
+
+        if not boxes:
+            # Move to the next sample if no boxes found
+            current_sample_token = my_sample.get('next', '')
+            continue
+
+        for box in boxes:
+            try:
+                # box.token is the sample_annotation_token
+                sample_annotation = trucksc.get('sample_annotation', box.token)
+                instance_token = sample_annotation['instance_token']
+
+                # Get dimensions and round them to handle potential float inaccuracies
+                # box.wlh = [width(y), length(x), height(z)]
+                dimensions = tuple(np.round(box.wlh, precision))
+
+                # Store timestamp and dimensions for this instance
+                tracked_dimensions[instance_token].append((timestamp, dimensions))
+
+            except KeyError:
+                 # This might happen if an annotation token is somehow invalid
+                 print(f"Warning: Could not find sample_annotation or instance_token for box token {getattr(box, 'token', 'N/A')} in sample {current_sample_token}")
+            except Exception as e:
+                 print(f"Warning: Error processing box token {getattr(box, 'token', 'N/A')} in sample {current_sample_token}: {e}")
+
+
+        # Move to the next sample
+        current_sample_token = my_sample.get('next', '')
+        if not current_sample_token:
+             # print(f"Processed {sample_count} samples. Reached end of scene '{scene_name}'.") # Optional: end of scene message
+             break # Explicit break
+
+    # --- Analysis ---
+    print(f"\n--- Dimension Analysis Results for Scene '{scene_name}' ---")
+    changed_count = 0
+    constant_count = 0
+    instances_analyzed = 0
+
+    if not tracked_dimensions:
+        print("No object instances with annotations found in this scene.")
+        return
+
+    for instance_token, history in tracked_dimensions.items():
+        instances_analyzed += 1
+        # Get unique dimension tuples observed for this instance
+        # We stored rounded tuples, so set comparison works well
+        unique_dims = set(dims for ts, dims in history)
+
+        if len(unique_dims) > 1:
+            changed_count += 1
+            print(f"\n[!] Dimensions CHANGED for Instance Token: {instance_token}")
+            # Sort history by timestamp for clarity before printing
+            history.sort(key=lambda item: item[0])
+            last_dims = None
+            for ts, dims in history:
+                 # Print only when dimensions change compared to the last printed entry for this instance
+                 if dims != last_dims:
+                    print(f"  - Timestamp: {ts}, Dimensions (W, L, H): {dims}")
+                    last_dims = dims
+        else:
+            constant_count += 1
+            # Optional: Print info about constant boxes if needed
+            # if history: # Check if history is not empty
+            #    first_ts, first_dims = history[0]
+            #    print(f"\n[OK] Dimensions CONSTANT for Instance Token: {instance_token}")
+            #    print(f"   Dimensions (W, L, H): {first_dims} (Observed across {len(history)} frames)")
+
+
+    print("\n--- Summary ---")
+    print(f"Total unique object instances analyzed: {instances_analyzed}")
+    print(f"Instances with changing dimensions:     {changed_count}")
+    print(f"Instances with constant dimensions:   {constant_count}")
+    print("---------------\n")
+
+
+def get_images(trucksc, my_sample, sensor):
+    my_sample_data = my_sample['data']
+    cam_left_front_data = trucksc.get('sample_data', my_sample_data[sensor])
+    print(my_sample_data)
+    print(cam_left_front_data)
+    img_path_left_front = cam_left_front_data['filename']
+
+    img = Image.open(os.path.join(trucksc.dataroot, img_path_left_front))
+
+    return img
+
+
 def main(trucksc):
     sensors = ['LIDAR_LEFT', 'LIDAR_RIGHT', 'LIDAR_TOP_FRONT', 'LIDAR_TOP_LEFT', 'LIDAR_TOP_RIGHT', 'LIDAR_REAR']
     my_scene = trucksc.scene[0]
@@ -281,6 +411,7 @@ def main(trucksc):
 
     first_sample_token = my_scene['first_sample_token']
     my_sample = trucksc.get('sample', first_sample_token)
+    print(my_sample)
 
     while True:
         boxes = get_boxes(trucksc, my_sample)
@@ -339,8 +470,30 @@ def main(trucksc):
 
         pc_fused_ego = sensor_fused_pc.points.T
 
+        camera = 'CAMERA_LEFT_FRONT'
+
+        images = get_images(trucksc, my_sample, camera)
+
+        plt.figure(figsize=(12, 8))  # Size in inches (12x8 inches, adjust as needed)
+        plt.imshow(images)
+        plt.title("Left Front Camera Image", fontsize=16)
+        plt.axis('off')
+        plt.tight_layout()
+        plt.show()
+
+        camera = 'CAMERA_LEFT_BACK'
+        images_2 = get_images(trucksc, my_sample, camera)
+
+        plt.figure(figsize=(12, 8))  # Size in inches (12x8 inches, adjust as needed)
+        plt.imshow(images_2)
+        plt.title("Left Back Camera Image", fontsize=16)
+        plt.axis('off')
+        plt.tight_layout()
+        plt.show()
+
         visualize_pointcloud_bbox(pc_fused_ego, gt_boxes=gt_bbox_3d,
                                   title=f"Fused filtered static sensor PC + BBoxes - Frame")
+
 
         next_sample_token = my_sample['next']
         if next_sample_token != '':
@@ -354,5 +507,7 @@ if __name__ == '__main__':
     truckscenes = TruckScenes(version='v1.0-trainval',
                               dataroot='/home/max/ssd/Masterarbeit/TruckScenes/trainval/v1.0-trainval',
                               verbose=True)
+    for i in range(0, 50):
+        track_box_dimensions(trucksc=truckscenes, scene_index=i)
 
     main(truckscenes)
