@@ -750,6 +750,8 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         object_category = [truckscenes.get('sample_annotation', box_token)['category_name'] for box_token in
                            boxes_token]  # retrieves category name for each bounding box
 
+        visualize_pointcloud_bbox(sensor_fused_pc.points.T, boxes=boxes,
+                                  title=f"Fused filtered static sensor PC + BBoxes - Frame {i}")
 
         ############################# get object categories ##########################
         converted_object_category = []  # Initialize empty list
@@ -931,7 +933,9 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
         # Assign the calculated variables to the desired keys
         pc_ego_i_save = pc_ego.copy()  # Filtered points in current ego frame (Features, N)
+        print(f"Frame {i}: Static points in ego frame shape: {pc_ego_i_save.shape}")
         pc_with_semantic_ego_i_save = pc_with_semantic_ego.copy()  # Filtered semantic points in current ego frame (Features+1, N)
+        print(f"Frame {i}: Static semantic points in ego frame shape: {pc_with_semantic_ego_i_save.shape}")
         pc_ego_ref_save = points_in_ref_frame.copy()  # Filtered points transformed to reference ego frame (Features, N)
         pc_with_semantic_ego_ref_save = semantic_points_in_ref_frame.copy()  # Filtered semantic points transformed to reference ego frame (Features+1, N)
         pc_global_save = points_in_global_frame.copy()  # Filtered points transformed to global frame (Features, N)
@@ -949,7 +953,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             "gt_bbox_3d": gt_bbox_3d,  # BBox in current frame's ego coords
             "object_tokens": object_tokens,
             "object_points_list": object_points_list,  # Raw object points in current ego frame
-            "raw_lidar_ego": sensor_fused_pc,
+            "raw_lidar_ego": sensor_fused_pc.points.T,
             "lidar_pc_ego_i": pc_ego_i_save,  # Filtered static points in CURRENT ego frame (i)
             "lidar_pc_with_semantic_ego_i": pc_with_semantic_ego_i_save,
             # Filtered semantic static points in CURRENT ego frame (i)
@@ -991,7 +995,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     # Extract static points (already in ref ego frame, Features x N format)
     # Use the correct key from the dictionary populated earlier
     unrefined_pc_ego_list = [frame_dict['lidar_pc_ego_i'] for frame_dict in dict_list]
-    print(f"  Extracted {len(unrefined_pc_ego_list)} static point clouds (in ego frame).")
+    print(f"Extracted {len(unrefined_pc_ego_list)} static point clouds (in ego i frame).")
     # Optional: Check shape of first element if list is not empty
     # if unrefined_pc_ref_ego_list:
     #     print(f"  Shape of first cloud: {unrefined_pc_ref_ego_list[0].shape}")
@@ -999,53 +1003,58 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     # Extract semantic static points (already in ref ego frame, Features+1 x N format)
     # Use the correct key from the dictionary populated earlier
     unrefined_sem_pc_ego_list = [frame_dict['lidar_pc_with_semantic_ego_i'] for frame_dict in dict_list]
-    print(f"  Extracted {len(unrefined_sem_pc_ego_list)} semantic point clouds (in ego frame).")
+    print(f"Extracted {len(unrefined_sem_pc_ego_list)} semantic point clouds (in ego i frame).")
     # Optional: Check shape of first element if list is not empty
     # if unrefined_sem_pc_ref_ego_list:
     #     print(f"  Shape of first semantic cloud: {unrefined_sem_pc_ref_ego_list[0].shape}")
 
     pc_ego_combined_draw = np.concatenate(unrefined_pc_ego_list, axis=0)
-    print(pc_ego_combined_draw.shape)
+    print(f"Pc ego i combined shape: {pc_ego_combined_draw.shape}")
     pc_ego_to_draw = o3d.geometry.PointCloud()
     pc_coordinates = pc_ego_combined_draw[:, :3]
     pc_ego_to_draw.points = o3d.utility.Vector3dVector(pc_coordinates)
-    o3d.visualization.draw_geometries([pc_ego_to_draw])
+    o3d.visualization.draw_geometries([pc_ego_to_draw], window_name="Combined static point clouds (in ego i frame)")
 
     unrefined_pc_ego_ref_list = [frame_dict['lidar_pc_ego_ref'] for frame_dict in dict_list]
+    print(f"Extracted {len(unrefined_pc_ego_ref_list)} static point clouds (in ego ref frame).")
     unrefined_sem_pc_ego_ref_list = [frame_dict['lidar_pc_with_semantic_ego_ref'] for frame_dict in dict_list]
+    print(f"Extracted {len(unrefined_sem_pc_ego_ref_list)} semantic static point clouds (in ego ref frame).")
 
     pc_ego_ref_combined_draw = np.concatenate(unrefined_pc_ego_ref_list, axis=0)
-    print(pc_ego_ref_combined_draw.shape)
+    print(f"Pc ego ref combined shape: {pc_ego_ref_combined_draw.shape}")
     pc_ego_ref_to_draw = o3d.geometry.PointCloud()
     pc_ego_ref_coordinates = pc_ego_ref_combined_draw[:, :3]
     pc_ego_ref_to_draw.points = o3d.utility.Vector3dVector(pc_ego_ref_coordinates)
-    o3d.visualization.draw_geometries([pc_ego_ref_to_draw])
+    o3d.visualization.draw_geometries([pc_ego_ref_to_draw], window_name="Combined static point clouds (in ego ref frame)")
 
     unrefined_pc_global_list = [frame_dict['lidar_pc_global'] for frame_dict in dict_list]
+    print(f"Extracted {len(unrefined_pc_global_list)} static point clouds (in world frame).")
     unrefined_sem_pc_global_list = [frame_dict['lidar_pc_with_semantic_global'] for frame_dict in dict_list]
+    print(f"Extracted {len(unrefined_sem_pc_global_list)} semantic static point clouds (in world frame).")
 
     pc_global_combined_draw = np.concatenate(unrefined_pc_global_list, axis=0)
-    print(pc_global_combined_draw.shape)
+    print(f"Pc global shape: {pc_global_combined_draw.shape}")
     pc_global_to_draw = o3d.geometry.PointCloud()
     pc_global_coordinates = pc_global_combined_draw[:, :3]
     pc_global_to_draw.points = o3d.utility.Vector3dVector(pc_global_coordinates)
-    o3d.visualization.draw_geometries([pc_global_to_draw])
+    o3d.visualization.draw_geometries([pc_global_to_draw], window_name="Combined static point clouds (in ego ref frame)")
 
-    raw_pc_list = [frame_dict['raw_lidar_ego'].points for frame_dict in dict_list]
-    print(raw_pc_list[0].shape)
-    raw_pc_draw = np.concatenate(raw_pc_list, axis=1)
+    raw_pc_list = [frame_dict['raw_lidar_ego'] for frame_dict in dict_list]
+    print(f"Extracted {len(raw_pc_list)} static and dynamic point clouds (in ego i frame).")
+    raw_pc_draw = np.concatenate(raw_pc_list, axis=0)
+    print(f"Raw Pc with static and dynamic points shape: {raw_pc_draw.shape}")
     raw_pc_to_draw = o3d.geometry.PointCloud()
-    raw_pc_coordinates = raw_pc_draw.T[:, :3]
+    raw_pc_coordinates = raw_pc_draw[:, :3]
     raw_pc_to_draw.points = o3d.utility.Vector3dVector(raw_pc_coordinates)
-    o3d.visualization.draw_geometries([raw_pc_to_draw])
+    o3d.visualization.draw_geometries([raw_pc_to_draw], window_name="Combined static and dynamic point clouds (in ego frame)")
 
     # Extract timestamps associated with each frame's original ego pose
     try:
         # Adjust key if needed based on your ego_pose dictionary structure
         lidar_timestamps = [frame_dict['sample_timestamp'] for frame_dict in dict_list]
-        print(f"  Extracted {len(lidar_timestamps)} timestamps.")
+        print(f"Extracted {len(lidar_timestamps)} timestamps.")
     except KeyError:
-        print("  Timestamp key not found in ego_pose, setting lidar_timestamps to None.")
+        print("Timestamp key not found in ego_pose, setting lidar_timestamps to None.")
         lidar_timestamps = None  # Fallback
 
     print(f"Lidar timestamps: {lidar_timestamps}")
@@ -1070,6 +1079,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                 sequence_id=f"{scene_name}_icp_run"
             )
             print(f"Created InMemoryDataset with {len(in_memory_dataset)} scans.")
+
         except Exception as e:
             print(f"Error creating InMemoryDataset: {e}. Skipping refinement.")
             args.icp_refinement = False  # Disable refinement
@@ -1122,7 +1132,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                 pose = estimated_poses_kiss[idx]
                 print(f"Applying refined pose {idx}: {pose}")
 
-                print(points_ego.shape)
+                print(f"Points ego shape: {points_ego.shape}")
 
                 #points_xyz = points_ego.T[:, :3]
                 points_xyz = points_ego[:, :3]
@@ -1138,21 +1148,29 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
             for idx, points_semantic_ego in enumerate(unrefined_sem_pc_ego_list):
                 pose = estimated_poses_kiss[idx]
+                print(f"Applying refined pose {idx}: {pose}")
 
-                points_xyz = points_semantic_ego.T[:, :3]
+                print(f"Points semantic ego shape: {points_semantic_ego.shape}")
+                points_xyz = points_semantic_ego[:, :3]
                 points_homo = np.hstack((points_xyz, np.ones((points_xyz.shape[0], 1))))
                 points_transformed = (pose @ points_homo.T)[:3, :].T
 
                 if points_semantic_ego.shape[0] > 3:
-                    other_features = points_semantic_ego.T[:, 3:]
+                    other_features = points_semantic_ego[:, 3:]
                     points_transformed = np.hstack((points_transformed, other_features))
 
                 refined_lidar_pc_with_semantic_list.append(points_transformed)
 
+
+    if not args.icp_refinement:
+        refined_lidar_pc_list = unrefined_pc_ego_ref_list
+        refined_lidar_pc_with_semantic_list = unrefined_sem_pc_ego_ref_list
+        poses_kiss_icp = None
+
     # Assuming refined lists contain (Features, N) based on appending .T earlier
     lidar_pc_list_for_concat = [pc for pc in refined_lidar_pc_list if
                                 pc.shape[1] > 0]  # Transpose to (N, Features) and filter empty
-    lidar_pc_with_semantic_list_for_concat = [pc.T for pc in refined_lidar_pc_with_semantic_list if
+    lidar_pc_with_semantic_list_for_concat = [pc for pc in refined_lidar_pc_with_semantic_list if
                                               pc.shape[1] > 0]  # Transpose to (N, Features) and filter empty
 
     if lidar_pc_list_for_concat:
@@ -1172,7 +1190,6 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         [1.0, 0.0, 0.0],  # Red for frame 1
         [0.0, 0.0, 1.0]  # Blue for frame 25
     ]
-    scene_name_visu = "Comparison frames"  # Replace with actual scene name
 
     # Check if the list is long enough
     if len(refined_lidar_pc_list) <= max(frame_indices_to_viz):
@@ -1226,8 +1243,11 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
         ################## concatenate all semantic scene segments ########################
     if lidar_pc_with_semantic_list_for_concat:
-        print(lidar_pc_with_semantic_list_for_concat[0].shape)
-        lidar_pc_with_semantic_final_global = np.concatenate(lidar_pc_with_semantic_list_for_concat,
+        if lidar_pc_with_semantic_list_for_concat[0].shape[1] > 5:
+            lidar_pc_with_semantic_final_global = np.concatenate(lidar_pc_with_semantic_list_for_concat,
+                                                                 axis=1)  # Shape (N_total, Features)
+        else:
+            lidar_pc_with_semantic_final_global = np.concatenate(lidar_pc_with_semantic_list_for_concat,
                                                              axis=0)  # Shape (N_total, Features)
         print(f"Concatenated refined semantic global points. Shape: {lidar_pc_with_semantic_final_global.shape}")
     else:
@@ -1407,9 +1427,14 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         ego_pose = truckscenes.getclosest('ego_pose', sample['timestamp'])
         ego_from_global = transform_matrix(ego_pose['translation'], Quaternion(ego_pose['rotation']), inverse=True)
 
-        T_ref_from_k = poses_kiss_icp[i]
-        T_k_from_ref = np.linalg.inv(T_ref_from_k)
-        tranforms_ref_to_k.append(T_k_from_ref)
+        if args.icp_refinement:
+            T_ref_from_k = poses_kiss_icp[i]
+            T_k_from_ref = np.linalg.inv(T_ref_from_k)
+            tranforms_ref_to_k.append(T_k_from_ref)
+        else:
+            T_ref_from_k = frame_dict['ego_ref_from_ego_i']
+            T_k_from_ref = np.linalg.inv(T_ref_from_k)
+            tranforms_ref_to_k.append(T_ref_from_k)
 
         # Get global point clouds for this iteration (use copies to avoid modifying originals accidentally)
         point_cloud_global_xyz = lidar_pc[:3, :].copy()  # Global static XYZ (3, N)
