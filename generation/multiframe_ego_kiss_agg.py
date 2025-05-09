@@ -1564,7 +1564,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
         labels_array = np.array(converted_object_category).reshape(-1, 1)
 
-        # Check if the number of labels matches the number of boxes
+        """# Check if the number of labels matches the number of boxes
         if locs.shape[0] == labels_array.shape[0]:
             # Concatenate geometric data AND the labels array
             # Resulting shape will be (N, 3+3+1+1) = (N, 8)
@@ -1584,7 +1584,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             print(
                 f"ERROR: Mismatch between number of boxes ({locs.shape[0]}) and number of labels ({labels_array.shape[0]}) for frame {i}. Skipping save.")
 
-            # ------------------------------------------------
+            # ------------------------------------------------"""
 
         gt_bbox_3d[:, 6] += np.pi / 2.
         gt_bbox_3d[:, 2] -= dims[:, 2] / 2.
@@ -1633,21 +1633,21 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
                     break  # No need to check further once matched
 
-        temp_points_filename = f'frame_{i}_temp_points.npy'
+        """temp_points_filename = f'frame_{i}_temp_points.npy'
         sem_temp_points_filename = f'frame_{i}_sem_temp_points.npy'
         dirs = os.path.join(save_path, scene_name, frame_dict['sample_token'])  #### Save in folder with scene name
         if not os.path.exists(dirs):  # create directory if does not exist
             os.makedirs(dirs)
         output_filepath_temp = os.path.join(dirs, temp_points_filename)
-        output_filepath_sem_temp = os.path.join(dirs, sem_temp_points_filename)
+        output_filepath_sem_temp = os.path.join(dirs, sem_temp_points_filename)"""
         # Combine Scene Points with Object Points
         try:  # avoid concatenate an empty array
             temp = np.concatenate(object_points_list)
 
-            # ---- EXPORT temp points ----
+            """# ---- EXPORT temp points ----
             np.save(output_filepath_temp, temp)
             print(f"Saved temp object points for frame {i} to {output_filepath_temp}")
-            # ----------------------------
+            # ----------------------------"""
             # scene_points = point_cloud.T
             scene_points = np.concatenate(
                 [point_cloud.T, temp])  # Merge static scene points and object points
@@ -1655,10 +1655,10 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             scene_points = point_cloud  # If no object points, only use static scene points
         try:
             temp = np.concatenate(object_semantic_list)
-            # ---- EXPORT temp points ----
+            """# ---- EXPORT temp points ----
             np.save(output_filepath_sem_temp, temp)
             print(f"Saved temp object points for frame {i} to {output_filepath_sem_temp}")
-            # ----------------------------
+            # ----------------------------"""
             # scene_semantic_points = point_cloud_with_semantic.T
             scene_semantic_points = np.concatenate(
                 [point_cloud_with_semantic.T, temp])  # Merge semantic points from objects and static scenes
@@ -1904,9 +1904,9 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
         output_filepath = os.path.join(dirs, save_path_base + '.npz')
         print(f"Saving semantic occupancy grid to {output_filepath}...")
-        np.savez_compressed(output_filepath, occupancy=occupancy_grid)
+        np.savez_compressed(output_filepath, semantics=occupancy_grid)
 
-        ####################################################################################
+        """##########################################Save as .npy ##########################################
         # Save the resulting dense voxels with semantics
         dirs = os.path.join(save_path, scene_name, frame_dict['sample_token'])  #### Save in folder with scene name
         if not os.path.exists(dirs):  # create directory if does not exist
@@ -1921,7 +1921,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         # Save the dense semantic voxels as a numpy file with a filename corresponding to the frame
         print(f"Saving GT to {output_filepath}...")  ####
         np.save(output_filepath, dense_voxels_with_semantic_voxelcoords_save)  ### saving point cloud
-        print(f"Dense voxels with semantic shape {dense_voxels_with_semantic_voxelcoords_save.shape} saved.")
+        print(f"Dense voxels with semantic shape {dense_voxels_with_semantic_voxelcoords_save.shape} saved.")"""
 
         i = i + 1
         continue  # moves to the next frame for processing
