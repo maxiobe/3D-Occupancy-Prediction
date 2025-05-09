@@ -533,7 +533,9 @@ def visualize_pointcloud(points, colors=None, title="Point Cloud"):
 def visualize_pointcloud_bbox(points: np.ndarray,
                               boxes: Optional[List] = None, # Use List[Box] if Box class is imported
                               colors: Optional[Union[np.ndarray, str]] = None,
-                              title: str = "Point Cloud with BBoxes"):
+                              title: str = "Point Cloud with BBoxes",
+                              self_vehicle_range: Optional[List[float]] = None,  # New parameter
+                              vis_self_vehicle: bool = False):
     """
     Visualize a point cloud and optional bounding boxes using Open3D.
 
@@ -544,7 +546,10 @@ def visualize_pointcloud_bbox(points: np.ndarray,
         colors: Optional Nx3 RGB array or a string-based colormap (e.g., "label").
                 If "label", assumes the 4th column of `points` contains integer labels.
         title: Optional window title.
+        self_vehicle_range: Optional list [x_min, y_min, z_min, x_max, y_max, z_max] for the ego vehicle box.
+        vis_self_vehicle: If True and self_vehicle_range is provided, draws the ego vehicle box.
     """
+
     geometries = []
 
     # --- Point cloud ---
@@ -599,10 +604,28 @@ def visualize_pointcloud_bbox(points: np.ndarray,
             print(f"Error applying label coloring: {e}. Using default colors.")
             use_label_coloring = False # Revert if error occurred
 
-
     geometries.append(pcd)
 
-    # --- Bounding boxes ---
+    # --- Ego Vehicle Bounding Box ---
+    if vis_self_vehicle and self_vehicle_range is not None:
+        if len(self_vehicle_range) == 6:
+            x_min_s, y_min_s, z_min_s, x_max_s, y_max_s, z_max_s = self_vehicle_range
+            center_s = np.array([(x_min_s + x_max_s) / 2.0,
+                                 (y_min_s + y_max_s) / 2.0,
+                                 (z_min_s + z_max_s) / 2.0])
+            # Open3D extent is [length(x), width(y), height(z)]
+            extent_s = np.array([x_max_s - x_min_s,
+                                 y_max_s - y_min_s,
+                                 z_max_s - z_min_s])
+            R_s = np.eye(3)  # Ego vehicle box is axis-aligned in its own coordinate frame
+            ego_obb = o3d.geometry.OrientedBoundingBox(center_s, R_s, extent_s)
+            ego_obb.color = (0.0, 0.8, 0.2)  # Green color for ego vehicle
+            geometries.append(ego_obb)
+        else:
+            print(
+                f"Warning: self_vehicle_range provided for ego vehicle but not of length 6. Got: {self_vehicle_range}")
+
+    # --- Other Bounding boxes (Annotations) ---
     num_boxes_drawn = 0
     if boxes is not None:
         for i, box in enumerate(boxes):
@@ -631,7 +654,9 @@ def visualize_pointcloud_bbox(points: np.ndarray,
         return
 
     point_count = np.asarray(pcd.points).shape[0]
-    print(f"Visualizing point cloud with {point_count} points and {num_boxes_drawn} boxes.")
+    num_ego_box = 1 if (vis_self_vehicle and self_vehicle_range is not None and len(self_vehicle_range) == 6) else 0
+    print(
+        f"Visualizing point cloud with {point_count} points, {num_boxes_drawn} annotation boxes, and {num_ego_box} ego vehicle box.")
     o3d.visualization.draw_geometries(geometries, window_name=title)
 
 
@@ -750,8 +775,11 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         object_category = [truckscenes.get('sample_annotation', box_token)['category_name'] for box_token in
                            boxes_token]  # retrieves category name for each bounding box
 
-        visualize_pointcloud_bbox(sensor_fused_pc.points.T, boxes=boxes,
-                                  title=f"Fused filtered static sensor PC + BBoxes - Frame {i}")
+        """visualize_pointcloud_bbox(sensor_fused_pc.points.T,
+                                  boxes=boxes,
+                                  title=f"Fused filtered static sensor PC + BBoxes + Ego BBox - Frame {i}",
+                                  self_vehicle_range=self_range,
+                                  vis_self_vehicle=True)"""
 
         ############################# get object categories ##########################
         converted_object_category = []  # Initialize empty list
@@ -1637,12 +1665,24 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         except:
             scene_semantic_points = point_cloud_with_semantic  # If no object points, only use static scene points
 
+        print(f"Scene points before applying range filtering: {scene_points.shape}")
         mask = in_range_mask(scene_points, pc_range)
 
         scene_points = scene_points[mask]
+        print(f"Scene points after applying range filtering: {scene_points.shape}")
 
-        visualize_pointcloud_bbox(scene_points, boxes=boxes,
-                                  title=f"Fused filtered static sensor PC + BBoxes - Frame {i}")
+        visualize_pointcloud_bbox(scene_points,
+                                  boxes=boxes,
+                                  title=f"Fused dynamic and static PC + BBoxes + Ego BBox - Frame {i}",
+                                  self_vehicle_range=self_range,
+                                  vis_self_vehicle=True)
+
+        ################## get semantics of sparse points  ##############
+        print(f"Scene semantic points before applying range filtering: {scene_semantic_points.shape}")
+        mask = in_range_mask(scene_semantic_points, pc_range)
+
+        scene_semantic_points = scene_semantic_points[mask]  # Filter points within a spatial range
+        print(f"Scene semantic points after applying range filtering: {scene_semantic_points.shape}")
 
         if args.filter_location in ['final', 'all'] and args.filter_mode != 'none':
             print(f"Filtering {scene_points.shape}")
@@ -1656,6 +1696,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
 
         if args.meshing:
+            print("--- Starting Meshing and Voxelization---")
             print(f"Shape of scene points before meshing: {scene_points.shape}")
 
             ################## get mesh via Possion Surface Reconstruction ##############
@@ -1667,7 +1708,6 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             with_normal2.points = with_normal.points  # copies the processed points and normals to another point clouds
             with_normal2.normals = with_normal.normals  # copies the processed points and normals to another point clouds
 
-            print("Meshing")
             # Generate mesh from point cloud using Poisson Surface Reconstruction
             mesh, _ = create_mesh_from_map(None, config['depth'], config['n_threads'],
                                            config['min_density'], with_normal2)
@@ -1676,99 +1716,182 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             print(f"Shape of scene points after meshing: {scene_points.shape}")
 
             ################## remain points with a spatial range ##############
-            mask = in_range_mask(scene_points, pc_range)
+            mask_meshing = in_range_mask(scene_points, pc_range)
 
-            scene_points = scene_points[mask]  # Filter points within a spatial range
+            scene_points = scene_points[mask_meshing]  # Filter points within a spatial range
 
-        ################## convert points to voxels ##############
-        pcd_np = scene_points
-        # Normalize points to voxel grid, transforms 3D points into voxel coordinates
-        pcd_np[:, 0] = (pcd_np[:, 0] - pc_range[
-            0]) / voxel_size  # voxel size: controls the granularity of voxel grid
-        pcd_np[:, 1] = (pcd_np[:, 1] - pc_range[
-            1]) / voxel_size  # point cloud range (pc_range): defines bounding box
-        pcd_np[:, 2] = (pcd_np[:, 2] - pc_range[2]) / voxel_size
-        pcd_np = np.floor(pcd_np).astype(int)  # Round down to nearest integer
+            pcd_meshed_vox_indices = scene_points.copy()
 
-        pcd_np[:, 0] = np.clip(pcd_np[:, 0], 0, occ_size[0] - 1)
-        pcd_np[:, 1] = np.clip(pcd_np[:, 1], 0, occ_size[1] - 1)
-        pcd_np[:, 2] = np.clip(pcd_np[:, 2], 0, occ_size[2] - 1)
+            pcd_meshed_vox_indices[:, 0] = (pcd_meshed_vox_indices[:, 0] - pc_range[0]) / voxel_size
+            pcd_meshed_vox_indices[:, 1] = (pcd_meshed_vox_indices[:, 1] - pc_range[1]) / voxel_size
+            pcd_meshed_vox_indices[:, 2] = (pcd_meshed_vox_indices[:, 2] - pc_range[2]) / voxel_size
+            pcd_meshed_vox_indices = np.floor(pcd_meshed_vox_indices).astype(int)
 
-        voxel = np.zeros(occ_size)  # initialize voxel grid with zeros to represent empty voxels
-        voxel[pcd_np[:, 0], pcd_np[:, 1], pcd_np[:, 2]] = 1  # marks occupied voxels as 1
+            pcd_meshed_vox_indices[:, 0] = np.clip(pcd_meshed_vox_indices[:, 0], 0, occ_size[0] - 1)
+            pcd_meshed_vox_indices[:, 1] = np.clip(pcd_meshed_vox_indices[:, 1], 0, occ_size[1] - 1)
+            pcd_meshed_vox_indices[:, 2] = np.clip(pcd_meshed_vox_indices[:, 2], 0, occ_size[2] - 1)
 
-        ################## convert voxel coordinates to LiDAR system  ##############
-        gt_ = voxel
-        # Generate grid coordinates (3D grid with voxel coordinates)
-        x = np.linspace(0, gt_.shape[0] - 1, gt_.shape[0])
-        y = np.linspace(0, gt_.shape[1] - 1, gt_.shape[1])
-        z = np.linspace(0, gt_.shape[2] - 1, gt_.shape[2])
-        X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
-        # Stack coordinates together to create a 3D arry of coordinate triples
-        vv = np.stack([X, Y, Z], axis=-1)
-        fov_voxels = vv[gt_ > 0]  # Extracts coordinates of occupied voxels
+            binary_voxel_grid = np.zeros(occ_size, dtype=bool)
+            unique_meshed_voxel_indices = np.unique(pcd_meshed_vox_indices[:, :3], axis=0)
+            if unique_meshed_voxel_indices.shape[0] > 0:
+                binary_voxel_grid[
+                    unique_meshed_voxel_indices[:, 0], unique_meshed_voxel_indices[:, 1], unique_meshed_voxel_indices[:,
+                                                                                          2]] = True
+            # Get voxel indices (vx,vy,vz) of occupied cells
+            x_occ_idx, y_occ_idx, z_occ_idx = np.where(binary_voxel_grid)
+            fov_voxel_indices = np.stack([x_occ_idx, y_occ_idx, z_occ_idx], axis=-1)
 
-        # convert voxel coordinates back to the LiDAR coordinate system
-        fov_voxels[:, :3] = (fov_voxels[:,
-                             :3] + 0.5) * voxel_size  # scaling back (multiply voxel coordinates by voxel size), centering voxels (add 0.5 to center of voxel) and adjusting range
-        fov_voxels[:, 0] += pc_range[0]
-        fov_voxels[:, 1] += pc_range[1]
-        fov_voxels[:, 2] += pc_range[2]
+            if fov_voxel_indices.shape[0] == 0:
+                print(
+                    "No fov_voxels (occupied centers) found after voxelizing mesh. Occupancy grid will be empty/free.")
+            else:
+                # Convert these occupied voxel indices to world coordinates (centers of voxels)
+                fov_voxels_world_xyz = fov_voxel_indices.astype(float)
+                fov_voxels_world_xyz[:, :3] = (fov_voxels_world_xyz[:, :3] + 0.5) * voxel_size
+                fov_voxels_world_xyz[:, 0] += pc_range[0]
+                fov_voxels_world_xyz[:, 1] += pc_range[1]
+                fov_voxels_world_xyz[:, 2] += pc_range[2]
 
-        ################## get semantics of sparse points  ##############
+                # Assign semantics using Chamfer distance
+                dense_voxels_needing_labels_world = fov_voxels_world_xyz
 
-        mask = in_range_mask(scene_semantic_points, pc_range)
+                if scene_semantic_points.shape[0] == 0:
+                    print(
+                        "WARNING: scene_semantic_points is empty for Chamfer. Labeled occupancy will be based on FREE_LEARNING_INDEX.")
+                    # occupancy_grid is already initialized to FREE
+                else:
+                    print(
+                        f"Chamfer - Dense (target needing labels) world shape: {dense_voxels_needing_labels_world.shape}")
+                    print(f"Chamfer - Sparse (source with labels) world shape: {scene_semantic_points.shape}")
 
-        scene_semantic_points = scene_semantic_points[mask]  # Filter points within a spatial range
+                    x_chamfer = torch.from_numpy(dense_voxels_needing_labels_world).cuda().unsqueeze(0).float()
+                    y_chamfer = torch.from_numpy(scene_semantic_points[:, :3]).cuda().unsqueeze(
+                        0).float()  # Use XYZ for distance
 
-        ################## Nearest Neighbor to assign semantics ##############
-        dense_voxels = fov_voxels  # voxel points that need semantic labels
-        sparse_voxels_semantic = scene_semantic_points  # Voxel points that already have semantic labels
-        print(f"Dense voxel shape is {dense_voxels.shape}")
-        print(f"Sparse semantic voxel shape is {sparse_voxels_semantic.shape}")
+                    _, _, idx1_chamfer, _ = chamfer.forward(x_chamfer, y_chamfer)
+                    indices_from_chamfer = idx1_chamfer[0].cpu().numpy()
 
-        # convert dense voxel points to torch tensor
-        x = torch.from_numpy(dense_voxels).cuda().unsqueeze(
-            0).float()  # uses cuda to move to a GPU and adds batch dimension by unsqueeze(0)
-        # Convert sparse semantic points to torch tensor
-        y = torch.from_numpy(sparse_voxels_semantic[:, :3]).cuda().unsqueeze(
-            0).float()  # uses cuda to move to GPU and add batch dim
-        d1, d2, idx1, idx2 = chamfer.forward(x,
-                                             y)  # Chamfer Distance to calculate nearest neighbors between dense and sparse points
-        # d1, d2: distances between nearest neighbors
-        # idx11, idx2: Indices of the nearest neighbors
+                    assigned_labels_for_dense = scene_semantic_points[
+                        indices_from_chamfer, 3]  # Assuming label is 4th col (index 3)
 
-        indices = idx1[0].cpu().numpy()  # convert torch tensor indices to a numpy array
+                    # Combine world coords of dense voxels with their new labels
+                    dense_voxels_world_with_semantic = np.concatenate(
+                        [dense_voxels_needing_labels_world, assigned_labels_for_dense[:, np.newaxis]], axis=1
+                    )
 
-        dense_semantic = sparse_voxels_semantic[:, 3][
-            np.array(indices)]  # uses the nearest neighbor indices to find the corresponding semantic label
+                    # Convert these world points (now with labels) to final voxel coordinates [vx,vy,vz,label]
+                    temp_voxel_coords = dense_voxels_world_with_semantic.copy()
+                    temp_voxel_coords[:, 0] = (temp_voxel_coords[:, 0] - pc_range[0]) / voxel_size
+                    temp_voxel_coords[:, 1] = (temp_voxel_coords[:, 1] - pc_range[1]) / voxel_size
+                    temp_voxel_coords[:, 2] = (temp_voxel_coords[:, 2] - pc_range[2]) / voxel_size
 
-        # Concatenates dense voxel coordinates and their assigned semantic labels
-        dense_voxels_with_semantic = np.concatenate([fov_voxels, dense_semantic[:, np.newaxis]], axis=1)
+                    # Store integer voxel coordinates and labels
+                    dense_voxels_with_semantic_voxelcoords = np.zeros_like(temp_voxel_coords, dtype=int)
+                    dense_voxels_with_semantic_voxelcoords[:, :3] = np.floor(temp_voxel_coords[:, :3]).astype(int)
+                    dense_voxels_with_semantic_voxelcoords[:, 3] = temp_voxel_coords[:, 3].astype(int)  # Labels column
 
-        # to voxel coordinate
-        pcd_np = dense_voxels_with_semantic
-        # Transforms world coordinates to voxel coordinates by normalizing
-        pcd_np[:, 0] = (pcd_np[:, 0] - pc_range[0]) / voxel_size
-        pcd_np[:, 1] = (pcd_np[:, 1] - pc_range[1]) / voxel_size
-        pcd_np[:, 2] = (pcd_np[:, 2] - pc_range[2]) / voxel_size
+                    # Clip to ensure within bounds
+                    dense_voxels_with_semantic_voxelcoords[:, 0] = np.clip(dense_voxels_with_semantic_voxelcoords[:, 0],
+                                                                           0, occ_size[0] - 1)
+                    dense_voxels_with_semantic_voxelcoords[:, 1] = np.clip(dense_voxels_with_semantic_voxelcoords[:, 1],
+                                                                           0, occ_size[1] - 1)
+                    dense_voxels_with_semantic_voxelcoords[:, 2] = np.clip(dense_voxels_with_semantic_voxelcoords[:, 2],
+                                                                           0, occ_size[2] - 1)
 
-        dense_voxels_with_semantic = np.floor(pcd_np).astype(
-            int)  # Use flooring to convert to discrete voxel indices
-        print(f"Shape of dense voxels for saving: {dense_voxels_with_semantic.shape}")
+                    # Populate the final occupancy_grid
+                    # Handle cases where multiple dense points might map to the same voxel cell
+                    # by taking the label of the first one encountered (due to np.unique)
+                    unique_final_vox_indices, unique_idx_map = np.unique(dense_voxels_with_semantic_voxelcoords[:, :3],
+                                                                         axis=0, return_index=True)
+                    labels_for_unique_final_voxels = dense_voxels_with_semantic_voxelcoords[unique_idx_map, 3]
+
+                    # Initialize 3D occupancy grid with the "Unknown" or "Background" label (e.g. 16)
+                    occupancy_grid = np.full(occ_size, FREE_LEARNING_INDEX, dtype=np.uint8)
+
+                    if unique_final_vox_indices.shape[0] > 0:
+                        occupancy_grid[
+                            unique_final_vox_indices[:, 0],
+                            unique_final_vox_indices[:, 1],
+                            unique_final_vox_indices[:, 2]
+                        ] = labels_for_unique_final_voxels
+
+                    occupied_mask = occupancy_grid != FREE_LEARNING_INDEX
+                    total_occupied_voxels = np.sum(occupied_mask)
+
+                    if np.any(occupied_mask):  # Check if there are any occupied voxels
+                        vx, vy, vz = np.where(occupied_mask)  # Get the indices (vx, vy, vz) of all occupied voxels
+                        labels_at_occupied = occupancy_grid[vx, vy, vz]  # Get the labels at these occupied locations
+
+                        # Stack them into the [vx, vy, vz, label] format
+                        dense_voxels_with_semantic_voxelcoords_save = np.stack([vx, vy, vz, labels_at_occupied],
+                                                                          axis=-1).astype(int)
+                    else:
+                        # If no voxels are occupied (e.g., the entire grid is FREE_LEARNING_INDEX)
+                        dense_voxels_with_semantic_voxelcoords_save = np.zeros((0, 4), dtype=int)
+
+        else:
+            print("--- Starting Voxelization without Meshing ---")
+            if scene_semantic_points.shape[0] == 0:
+                print("No semantic points available. Occupancy grid will be empty/free.")
+                # occupancy_grid already initialized to FREE, dense_voxels_with_semantic_voxelcoords is empty
+            else:
+                # Directly use scene_semantic_points (which are XYZL)
+                # Convert their world XYZ to voxel coordinates, keep their labels
+                points_to_voxelize = scene_semantic_points.copy()
+
+                labels = points_to_voxelize[:, 3].astype(int)  # Assuming label is 4th col
+
+                voxel_indices_float = np.zeros_like(points_to_voxelize[:, :3])
+                voxel_indices_float[:, 0] = (points_to_voxelize[:, 0] - pc_range[0]) / voxel_size
+                voxel_indices_float[:, 1] = (points_to_voxelize[:, 1] - pc_range[1]) / voxel_size
+                voxel_indices_float[:, 2] = (points_to_voxelize[:, 2] - pc_range[2]) / voxel_size
+
+                voxel_indices_int = np.floor(voxel_indices_float).astype(int)
+
+                dense_voxels_with_semantic_voxelcoords = np.concatenate(
+                    [voxel_indices_int, labels[:, np.newaxis]], axis=1
+                )
+
+                # Clip to ensure within bounds
+                dense_voxels_with_semantic_voxelcoords[:, 0] = np.clip(dense_voxels_with_semantic_voxelcoords[:, 0], 0,
+                                                                       occ_size[0] - 1)
+                dense_voxels_with_semantic_voxelcoords[:, 1] = np.clip(dense_voxels_with_semantic_voxelcoords[:, 1], 0,
+                                                                       occ_size[1] - 1)
+                dense_voxels_with_semantic_voxelcoords[:, 2] = np.clip(dense_voxels_with_semantic_voxelcoords[:, 2], 0,
+                                                                       occ_size[2] - 1)
+
+                # Initialize 3D occupancy grid with the "Unknown" or "Background" label (e.g. 16)
+                occupancy_grid = np.full(occ_size, FREE_LEARNING_INDEX, dtype=np.uint8)
+                # Populate the final occupancy_grid
+                # If multiple original semantic points fall into the same voxel, the last one's label will apply.
+                if dense_voxels_with_semantic_voxelcoords.shape[0] > 0:
+                    occupancy_grid[
+                        dense_voxels_with_semantic_voxelcoords[:, 0],
+                        dense_voxels_with_semantic_voxelcoords[:, 1],
+                        dense_voxels_with_semantic_voxelcoords[:, 2]
+                    ] = dense_voxels_with_semantic_voxelcoords[:, 3]
+
+                occupied_mask = occupancy_grid != FREE_LEARNING_INDEX
+                total_occupied_voxels = np.sum(occupied_mask)
+
+                if np.any(occupied_mask):  # Check if there are any occupied voxels
+                    vx, vy, vz = np.where(occupied_mask)  # Get the indices (vx, vy, vz) of all occupied voxels
+                    labels_at_occupied = occupancy_grid[vx, vy, vz]  # Get the labels at these occupied locations
+
+                    # Stack them into the [vx, vy, vz, label] format
+                    dense_voxels_with_semantic_voxelcoords_save = np.stack([vx, vy, vz, labels_at_occupied],
+                                                                           axis=-1).astype(int)
+                else:
+                    # If no voxels are occupied (e.g., the entire grid is FREE_LEARNING_INDEX)
+                    dense_voxels_with_semantic_voxelcoords_save = np.zeros((0, 4), dtype=int)
+
+        # --- Common finalization and saving logic ---
         print(
-            f"Occupancy shape: Occsize: {occ_size}, Total number voxels: {occ_size[0] * occ_size[1] * occ_size[2]}")
+            f"Shape of dense_voxels_with_semantic_voxelcoords for saving: {dense_voxels_with_semantic_voxelcoords_save.shape}")
+        print(
+            f"Occupancy shape: Occsize: {occupancy_grid.shape}, Total number voxels: {occupancy_grid.shape[0] * occupancy_grid.shape[1] * occupancy_grid.shape[2]}, Occupied: {total_occupied_voxels}")
 
         ##########################################save like Occ3D #######################################
-        # Initialize 3D occupancy grid with the "Unknown" or "Background" label (e.g. 16)
-        occupancy_grid = np.full(occ_size, FREE_LEARNING_INDEX, dtype=np.uint8)
-
-        # Assign semantic label to each voxel coordinate
-        for voxel in dense_voxels_with_semantic:
-            x, y, z, label = voxel
-            if 0 <= x < occ_size[0] and 0 <= y < occ_size[1] and 0 <= z < occ_size[2]:
-                occupancy_grid[x, y, z] = label
-
         # Save as .npz
         dirs = os.path.join(save_path, scene_name, frame_dict['sample_token'])
         if not os.path.exists(dirs):
@@ -1794,13 +1917,11 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         if save_path_base.endswith(suffix_to_remove):
             save_path_base = save_path_base[:-len(suffix_to_remove)]  ### Slice off suffix
 
-        #print(f"Dense voxels with semantic {dense_voxels_with_semantic}")
-        #print(f"Dense voxels with semantic shape {dense_voxels_with_semantic.shape}")
-
         output_filepath = os.path.join(dirs, save_path_base + '.npy')  ### Generate output filepath
         # Save the dense semantic voxels as a numpy file with a filename corresponding to the frame
         print(f"Saving GT to {output_filepath}...")  ####
-        np.save(output_filepath, dense_voxels_with_semantic)  ### saving point cloud
+        np.save(output_filepath, dense_voxels_with_semantic_voxelcoords_save)  ### saving point cloud
+        print(f"Dense voxels with semantic shape {dense_voxels_with_semantic_voxelcoords_save.shape} saved.")
 
         i = i + 1
         continue  # moves to the next frame for processing
