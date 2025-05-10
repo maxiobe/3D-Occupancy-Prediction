@@ -12,7 +12,7 @@ from truckscenes.utils import splits ### Truckscenes
 from tqdm import tqdm
 from truckscenes.utils.data_classes import Box, LidarPointCloud
 from truckscenes.utils.geometry_utils import view_points ### Truckscenes
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, Tuple
 from pyquaternion import Quaternion
 from scipy.interpolate import interp1d
 from scipy.spatial.transform import Rotation, Slerp
@@ -32,6 +32,36 @@ from kiss_icp.pipeline import OdometryPipeline
 from pathlib import Path
 
 from custom_datasets import InMemoryDataset
+
+#from numba import njit, prange
+
+
+CLASS_COLOR_MAP = {
+    0: [0.6, 0.6, 0.6],  # noise - gray
+    1: [0.9, 0.1, 0.1],  # barrier - red
+    2: [1.0, 0.6, 0.0],  # bicycle - orange
+    3: [0.5, 0.0, 0.5],  # bus - purple
+    4: [0.0, 0.0, 1.0],  # car - blue
+    5: [0.3, 0.3, 0.0],  # construction_vehicle - olive
+    6: [1.0, 0.0, 1.0],  # motorcycle - magenta
+    7: [1.0, 1.0, 0.0],  # pedestrian - yellow
+    8: [1.0, 0.5, 0.5],  # traffic_cone - light red
+    9: [0.5, 0.5, 0.0],  # trailer - mustard
+    10: [0.0, 1.0, 0.0], # truck - green
+    11: [0.2, 0.8, 0.8], # ego_vehicle - cyan
+    12: [1.0, 0.8, 0.0], # traffic_sign - gold
+    13: [0.4, 0.4, 0.8], # other_vehicle - steel blue
+    14: [0.0, 0.5, 0.5], # train - teal
+    15: [0.8, 0.8, 0.8], # Unknown - light gray
+    16: [0.0, 1.0, 1.0], # Background - bright cyan
+                         # (Assuming this is your FREE_LEARNING_INDEX or a general background for free/unobserved)
+}
+DEFAULT_COLOR = [0.3, 0.3, 0.3] # Default color for labels not in map (darker gray)
+
+# Constants for voxel states matching your usage
+STATE_UNOBSERVED = 0
+STATE_FREE = 1
+STATE_OCCUPIED = 2
 
 
 def transform_points(points_n_features, transform_4x4):
@@ -139,7 +169,7 @@ def transform_pointwise(points: np.ndarray, transforms: np.ndarray) -> np.ndarra
 
     return points.T
 
-def get_pointwise_fused_pointcloud(trucksc: TruckScenes, sample: Dict[str, Any], allowed_sensors: List[str]) -> LidarPointCloud:
+def get_pointwise_fused_pointcloud(trucksc: TruckScenes, sample: Dict[str, Any], allowed_sensors: List[str]) -> Tuple[LidarPointCloud, np.ndarray]:
     """ Returns a fused lidar point cloud for the given sample.
 
     Fuses the point clouds of the given sample and returns them in the ego
@@ -156,11 +186,13 @@ def get_pointwise_fused_pointcloud(trucksc: TruckScenes, sample: Dict[str, Any],
     Returns:
         fused_point_cloud: Fused lidar point cloud in the ego vehicle frame at the
             timestamp of the sample.
+        sensor_ids:      numpy array of shape (N_points,) indicating which sensor each point came from
     """
     # Initialize
     points = np.zeros((LidarPointCloud.nbr_dims(), 0), dtype=np.float64)
     timestamps = np.zeros((1, 0), dtype=np.uint64)
     fused_point_cloud = LidarPointCloud(points, timestamps)
+    sensor_ids = np.zeros((0,), dtype=int)
 
     # Get reference ego pose (timestamp of the sample/annotations)
     ref_ego_pose = trucksc.getclosest('ego_pose', sample['timestamp'])
@@ -171,9 +203,9 @@ def get_pointwise_fused_pointcloud(trucksc: TruckScenes, sample: Dict[str, Any],
                                        inverse=True)
 
     # Iterate over all lidar sensors and fuse their point clouds
-    for sensor in sample['data'].keys():
-        if sensor not in allowed_sensors:
-            print(f"Skipping sensor {sensor} as it is not allowed.")
+    for sensor_idx, sensor in enumerate(allowed_sensors):
+        if sensor not in sample['data']:
+            print(f"Skipping sensor {sensor} as it is not in sample data.")
             continue
         if 'lidar' not in sensor.lower():
             continue
@@ -218,14 +250,17 @@ def get_pointwise_fused_pointcloud(trucksc: TruckScenes, sample: Dict[str, Any],
 
         pc.transform(car_from_global)
 
+        M = pc.points.shape[1]
+        sensor_ids = np.hstack((sensor_ids, np.full(M, sensor_idx, dtype=int)))
+
         # Merge with key pc.
         fused_point_cloud.points = np.hstack((fused_point_cloud.points, pc.points))
         if pc.timestamps is not None:
             fused_point_cloud.timestamps = np.hstack((fused_point_cloud.timestamps, pc.timestamps))
 
-    return fused_point_cloud
+    return fused_point_cloud, sensor_ids
 
-def get_rigid_fused_pointcloud(trucksc: TruckScenes, sample: Dict[str, Any], allowed_sensors: List[str]) -> LidarPointCloud:
+def get_rigid_fused_pointcloud(trucksc: TruckScenes, sample: Dict[str, Any], allowed_sensors: List[str]) -> Tuple[LidarPointCloud, np.ndarray]:
     """ Returns a fused lidar point cloud for the given sample.
 
     Fuses the point clouds of the given sample and returns them in the ego
@@ -242,11 +277,13 @@ def get_rigid_fused_pointcloud(trucksc: TruckScenes, sample: Dict[str, Any], all
     Returns:
         fused_point_cloud: Fused lidar point cloud in the ego vehicle frame at the
             timestamp of the sample.
+        sensor_ids:      numpy array of shape (N_points,) indicating which sensor each point came from
     """
     # Initialize
     points = np.zeros((LidarPointCloud.nbr_dims(), 0), dtype=np.float64)
     timestamps = np.zeros((1, 0), dtype=np.uint64)
     fused_point_cloud = LidarPointCloud(points, timestamps)
+    sensor_ids = np.zeros((0,), dtype=int)
 
     # Get reference ego pose (timestamp of the sample/annotations)
     ref_ego_pose = trucksc.getclosest('ego_pose', sample['timestamp'])
@@ -257,9 +294,9 @@ def get_rigid_fused_pointcloud(trucksc: TruckScenes, sample: Dict[str, Any], all
                                        inverse=True)
 
     # Iterate over all lidar sensors and fuse their point clouds
-    for sensor in sample['data'].keys():
-        if sensor not in allowed_sensors:
-            print(f"Skipping sensor {sensor} as it is not allowed.")
+    for sensor_idx, sensor in enumerate(allowed_sensors):
+        if sensor not in sample['data']:
+            print(f"Skipping sensor {sensor} as it is not in sample data.")
             continue
         if 'lidar' not in sensor.lower():
             continue
@@ -290,12 +327,15 @@ def get_rigid_fused_pointcloud(trucksc: TruckScenes, sample: Dict[str, Any], all
         trans_matrix = reduce(np.dot, [car_from_global, global_from_car, car_from_current])
         pc.transform(trans_matrix)
 
+        M = pc.points.shape[1]
+        sensor_ids = np.hstack((sensor_ids, np.full(M, sensor_idx, dtype=int)))
+
         # Merge with key pc.
         fused_point_cloud.points = np.hstack((fused_point_cloud.points, pc.points))
         if pc.timestamps is not None:
             fused_point_cloud.timestamps = np.hstack((fused_point_cloud.timestamps, pc.timestamps))
 
-    return fused_point_cloud
+    return fused_point_cloud, sensor_ids
 
 
 def get_boxes(trucksc: TruckScenes, sample: Dict[str, Any]) -> List[Box]:
@@ -660,6 +700,294 @@ def visualize_pointcloud_bbox(points: np.ndarray,
     o3d.visualization.draw_geometries(geometries, window_name=title)
 
 
+def ray_casting(ray_start, ray_end, pc_range, voxel_size, spatial_shape, EPS=1e-9, DISTANCE=0.5):
+    """
+    3-D DDA / Amanatides–Woo ray casting.
+    Returns a list of integer 3-tuples (i,j,k) of all voxels traversed by the ray.
+    """
+    # shift into voxel grid coords
+    new_start = ray_start[:3] - pc_range[:3]
+    new_end = ray_end[:3] - pc_range[:3]
+
+    ray = new_end - new_start
+    step = np.sign(ray).astype(int)
+    tDelta = np.empty(3, float)
+    cur_voxel = np.empty(3, int)
+    last_voxel = np.empty(3, int)
+    tMax = np.empty(3, float)
+
+    # init
+    for k in range(3):
+        if ray[k] != 0:
+            tDelta[k] = (step[k] * voxel_size[k]) / ray[k]
+        else:
+            tDelta[k] = np.finfo(float).max
+
+        # nudge start/end inside to avoid boundary cases
+        new_start[k] += step[k] * voxel_size[k] * EPS
+        new_end[k] -= step[k] * voxel_size[k] * EPS
+
+        cur_voxel[k] = int(np.floor(new_start[k] / voxel_size[k]))
+        last_voxel[k] = int(np.floor(new_end[k] / voxel_size[k]))
+
+    # compute initial tMax
+    for k in range(3):
+        if ray[k] != 0:
+            # boundary coordinate
+            coord = cur_voxel[k] * voxel_size[k]
+            if step[k] < 0 and coord < new_start[k]:
+                boundary = coord
+            else:
+                boundary = coord + step[k] * voxel_size[k]
+            tMax[k] = (boundary - new_start[k]) / ray[k]
+        else:
+            tMax[k] = np.finfo(float).max
+
+    visited = []
+    # traverse until we've gone past last_voxel in any dimension
+    while np.all(step * (cur_voxel - last_voxel) < DISTANCE):
+        # record
+        visited.append(tuple(cur_voxel.copy()))
+        # step to next voxel
+        # pick axis with smallest tMax
+        m = np.argmin(tMax)
+        cur_voxel[m] += step[m]
+        if not (0 <= cur_voxel[m] < spatial_shape[m]):
+            break
+        tMax[m] += tDelta[m]
+    return visited
+
+"""
+@njit
+def ray_casting_numba(ray_start, ray_end, pc_range, voxel_size, spatial_shape, EPS=1e-9, DISTANCE=0.5):
+    new_start = ray_start - pc_range[:3]
+    new_end   = ray_end   - pc_range[:3]
+    ray = new_end - new_start
+    step = np.sign(ray).astype(np.int32)
+
+    tDelta = np.empty(3, np.float64)
+    cur_voxel  = np.empty(3, np.int32)
+    last_voxel = np.empty(3, np.int32)
+    tMax = np.empty(3, np.float64)
+
+    # initialize
+    for k in range(3):
+        if ray[k] != 0.0:
+            tDelta[k] = (step[k] * voxel_size[k]) / ray[k]
+        else:
+            tDelta[k] = np.finfo(np.float64).max
+
+        new_start[k] += step[k] * voxel_size[k] * EPS
+        new_end[k]   -= step[k] * voxel_size[k] * EPS
+
+        cur_voxel[k]  = int(np.floor(new_start[k] / voxel_size[k]))
+        last_voxel[k] = int(np.floor(new_end[k]   / voxel_size[k]))
+
+    # compute initial tMax
+    for k in range(3):
+        if ray[k] != 0.0:
+            coord = cur_voxel[k] * voxel_size[k]
+            if step[k] < 0 and coord < new_start[k]:
+                boundary = coord
+            else:
+                boundary = coord + step[k] * voxel_size[k]
+            tMax[k] = (boundary - new_start[k]) / ray[k]
+        else:
+            tMax[k] = np.finfo(np.float64).max
+
+    visited = []
+    while (step[0] * (cur_voxel[0] - last_voxel[0]) < DISTANCE and
+           step[1] * (cur_voxel[1] - last_voxel[1]) < DISTANCE and
+           step[2] * (cur_voxel[2] - last_voxel[2]) < DISTANCE):
+        # record
+        if (0 <= cur_voxel[0] < spatial_shape[0] and
+            0 <= cur_voxel[1] < spatial_shape[1] and
+            0 <= cur_voxel[2] < spatial_shape[2]):
+            visited.append((cur_voxel[0], cur_voxel[1], cur_voxel[2]))
+        # step to next voxel
+        m = 0
+        if tMax[1] < tMax[m]:
+            m = 1
+        if tMax[2] < tMax[m]:
+            m = 2
+        cur_voxel[m] += step[m]
+        tMax[m] += tDelta[m]
+
+    return visited"""
+
+
+
+def calculate_lidar_visibility(points, points_origin, points_label,
+                               pc_range, voxel_size, spatial_shape):
+    """
+    points:        (N,3) array of LiDAR hits
+    points_origin:(N,3) corresponding sensor origins
+    points_label:  (N,) integer semantic labels per point
+    Returns:
+      voxel_state: (H,W,Z) 0=NOT_OBS,1=FREE,2=OCC
+      voxel_label: (H,W,Z) semantic label (FREE_LABEL if no hit)
+    """
+    H, W, Z = spatial_shape
+    FREE_LABEL = -1
+    NOT_OBS, FREE, OCC = 0, 1, 2
+
+    voxel_occ_count = np.zeros(spatial_shape, int)
+    voxel_free_count = np.zeros(spatial_shape, int)
+    voxel_label = np.full(spatial_shape, FREE_LABEL, int)
+
+    # for each LiDAR point
+    for i in range(points.shape[0]):
+        if i % 10000 == 0:
+            print(f"Processed points {i}...")
+        start = points[i]
+        end = points_origin[i]
+        # direct hit voxel
+        tgt = ((start - pc_range[:3]) / voxel_size).astype(int)
+        if np.all((0 <= tgt) & (tgt < spatial_shape)):
+            voxel_occ_count[tuple(tgt)] += 1
+            voxel_label[tuple(tgt)] = int(points_label[i])
+        # walk the ray up to the point
+        for vox in ray_casting(start, end, pc_range, voxel_size, spatial_shape):
+            voxel_free_count[vox] += 1
+
+    # build state mask
+    voxel_state = np.full(spatial_shape, NOT_OBS, int)
+    voxel_state[voxel_free_count > 0] = FREE
+    voxel_state[voxel_occ_count > 0] = OCC
+    return voxel_state, voxel_label
+
+
+"""@njit(parallel=True)
+def calculate_lidar_visibility_numba(points, origins, labels,
+                                     pc_range, voxel_size, spatial_shape):
+    H, W, Z = spatial_shape
+    FREE_LABEL = -1
+    NOT_OBS, FREE, OCC = 0, 1, 2
+
+    # pre-allocate
+    voxel_occ_count  = np.zeros((H, W, Z), np.int32)
+    free_count = np.zeros((H, W, Z), np.int32)
+    occ_label  = np.full((H, W, Z), FREE_LABEL, np.int32)
+
+    N = points.shape[0]
+    for i in prange(N):
+        start = points[i]
+        end   = origins[i]
+        tgt = ((start - pc_range[:3]) / voxel_size).astype(np.int32)
+
+        # direct hit
+        if (0 <= tgt[0] < H and 0 <= tgt[1] < W and 0 <= tgt[2] < Z):
+            occ_count[tgt[0], tgt[1], tgt[2]] += 1
+            occ_label[tgt[0], tgt[1], tgt[2]] = labels[i]
+
+        # walk the ray
+        voxels = ray_casting_numba(start, end, pc_range, voxel_size, spatial_shape)
+        for (x,y,z) in voxels:
+            free_count[x,y,z] += 1
+
+    # build final state mask if you want
+    # state = np.zeros((H,W,Z), np.int32)
+    # state[free_count>0] = FREE
+    # state[occ_count>0] = OCC
+
+    return occ_count, free_count, occ_label"""
+
+
+def visualize_occupancy_o3d(voxel_state, voxel_label, pc_range, voxel_size,
+                            class_color_map, default_color,
+                            show_semantics=False, show_free=False, show_unobserved=False,
+                            point_size=2.0):
+    """
+    Visualizes occupancy grid using Open3D.
+
+    Args:
+        voxel_state (np.ndarray): 3D array, STATE_OCCUPIED (2), STATE_FREE (1), STATE_UNOBSERVED (0).
+        voxel_label (np.ndarray): 3D array of same shape, per-voxel semantic label.
+        pc_range (list or np.ndarray): [xmin, ymin, zmin, xmax, ymax, zmax].
+        voxel_size (list or np.ndarray): [vx, vy, vz].
+        class_color_map (dict): Mapping from semantic label index to RGB color.
+        default_color (list): Default RGB color for labels not in class_color_map.
+        show_semantics (bool): If True, color occupied voxels by their semantic label.
+                               Otherwise, occupied voxels are red.
+        show_free (bool): If True, visualize free voxels (colored light blue).
+        show_unobserved (bool): If True, visualize unobserved voxels (colored gray).
+        point_size (float): Size of the points in the Open3D visualizer.
+    """
+    geometries = []
+
+    # --- Process Occupied Voxels ---
+    occ_indices = np.where(voxel_state == STATE_OCCUPIED)
+    if len(occ_indices[0]) > 0:
+        # Convert voxel indices to world-coords of their centers
+        xs_occ = (occ_indices[0].astype(float) + 0.5) * voxel_size[0] + pc_range[0]
+        ys_occ = (occ_indices[1].astype(float) + 0.5) * voxel_size[1] + pc_range[1]
+        zs_occ = (occ_indices[2].astype(float) + 0.5) * voxel_size[2] + pc_range[2]
+
+        occupied_points_world = np.vstack((xs_occ, ys_occ, zs_occ)).T
+
+        pcd_occupied = o3d.geometry.PointCloud()
+        pcd_occupied.points = o3d.utility.Vector3dVector(occupied_points_world)
+
+        if show_semantics:
+            labels_occ = voxel_label[occ_indices]
+            colors_occ = np.array([class_color_map.get(int(label), default_color) for label in labels_occ])
+            pcd_occupied.colors = o3d.utility.Vector3dVector(colors_occ)
+        else:
+            pcd_occupied.paint_uniform_color([1.0, 0.0, 0.0])  # Red for occupied
+        geometries.append(pcd_occupied)
+    else:
+        print("No occupied voxels to show.")
+
+    # --- Process Free Voxels (Optional) ---
+    if show_free:
+        free_indices = np.where(voxel_state == STATE_FREE)
+        if len(free_indices[0]) > 0:
+            xs_free = (free_indices[0].astype(float) + 0.5) * voxel_size[0] + pc_range[0]
+            ys_free = (free_indices[1].astype(float) + 0.5) * voxel_size[1] + pc_range[1]
+            zs_free = (free_indices[2].astype(float) + 0.5) * voxel_size[2] + pc_range[2]
+            free_points_world = np.vstack((xs_free, ys_free, zs_free)).T
+
+            pcd_free = o3d.geometry.PointCloud()
+            pcd_free.points = o3d.utility.Vector3dVector(free_points_world)
+            pcd_free.paint_uniform_color([0.5, 0.7, 1.0])  # Light blue for free
+            geometries.append(pcd_free)
+        else:
+            print("No free voxels to show (or show_free=False).")
+
+    # --- Process Unobserved Voxels (Optional) ---
+    if show_unobserved:
+        unobserved_indices = np.where(voxel_state == STATE_UNOBSERVED)
+        if len(unobserved_indices[0]) > 0:
+            xs_unobs = (unobserved_indices[0].astype(float) + 0.5) * voxel_size[0] + pc_range[0]
+            ys_unobs = (unobserved_indices[1].astype(float) + 0.5) * voxel_size[1] + pc_range[1]
+            zs_unobs = (unobserved_indices[2].astype(float) + 0.5) * voxel_size[2] + pc_range[2]
+            unobserved_points_world = np.vstack((xs_unobs, ys_unobs, zs_unobs)).T
+
+            pcd_unobserved = o3d.geometry.PointCloud()
+            pcd_unobserved.points = o3d.utility.Vector3dVector(unobserved_points_world)
+            pcd_unobserved.paint_uniform_color([0.8, 0.8, 0.8])  # Light gray for unobserved
+            geometries.append(pcd_unobserved)
+        else:
+            print("No unobserved voxels to show (or show_unobserved=False).")
+
+    if not geometries:
+        print("Nothing to visualize.")
+        return
+
+    # Visualize
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(window_name='Occupancy Grid (Open3D)')
+    for geom in geometries:
+        vis.add_geometry(geom)
+
+    """opt = vis.get_render_option()
+    opt.point_size = point_size  # Adjust point size
+    opt.background_color = np.asarray([0.1, 0.1, 0.1])  # Dark background"""
+
+    vis.run()
+    vis.destroy_window()
+
+
 def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     # Extract necessary parameters from the arguments and configs
     save_path = args.save_path  # Directory where processed data will be saved
@@ -721,46 +1049,21 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         print (f"Processing frame {i}")
         ########### Load point cloud #############
         if load_mode == 'pointwise':
-            sensor_fused_pc = get_pointwise_fused_pointcloud(trucksc, my_sample, allowed_sensors=sensors)
+            sensor_fused_pc, sensor_ids_points = get_pointwise_fused_pointcloud(trucksc, my_sample, allowed_sensors=sensors)
         elif load_mode == 'rigid':
-            sensor_fused_pc = get_rigid_fused_pointcloud(trucksc, my_sample, allowed_sensors=sensors)
+            sensor_fused_pc, sensor_ids_points = get_rigid_fused_pointcloud(trucksc, my_sample, allowed_sensors=sensors)
         else:
             raise ValueError(f'Fusion mode {load_mode} is not supported')
 
-        print(f"The fused sensor pc at frame {i} has the shape: {sensor_fused_pc.points.shape}")
-
+        if sensor_fused_pc.timestamps is not None:
+            print(f"The fused sensor pc at frame {i} has the shape: {sensor_fused_pc.points.shape} with timestamps: {sensor_fused_pc.timestamps.shape}")
+        else:
+            print(f"The fused sensor pc at frame {i} has the shape: {sensor_fused_pc.points.shape} with no timestamps.")
+        
         # visualize_pointcloud(sensor_fused_pc.points.T, title=f"Fused sensor PC in ego coordinates - Frame {i}")
 
         if args.vis and args.vis_position == 'fused_sensors_ego':
             visualize_pointcloud(sensor_fused_pc.points.T, title=f"Fused sensor PC in ego coordinates - Frame {i}")
-
-        """geometries_to_draw = []
-        pcd = o3d.geometry.PointCloud()
-        #points_xyz_1 = sensor_fused_pc.points.T[:, :3]
-        points_xyz_1 = sensor_fused_pc.points[:3, :].T
-        pcd.points = o3d.utility.Vector3dVector(points_xyz_1)
-        pcd.paint_uniform_color([0.0, 0.0, 1.0])
-
-        geometries_to_draw.append(pcd)
-
-        center = np.array([(x_min_self + x_max_self) / 2.0,
-                           (y_min_self + y_max_self) / 2.0,
-                           (z_min_self + z_max_self) / 2.0])
-        extent = np.array([x_max_self - x_min_self,
-                           y_max_self - y_min_self,
-                           z_max_self - z_min_self])
-        # Rotation matrix is identity since it's axis-aligned in ego frame
-        R = np.eye(3)
-
-        # Create the Open3D oriented bounding box object
-        ego_filter_o3d_bbox = o3d.geometry.OrientedBoundingBox(center, R, extent)
-        ego_filter_o3d_bbox.color = (1.0, 0.0, 0.0)  # Set color to red
-        geometries_to_draw.append(ego_filter_o3d_bbox)
-
-        o3d.visualization.draw_geometries(
-            geometries_to_draw,
-            window_name=f"Frame {i}: Fused PC & Ego Filter Box (Ego Coords)"
-        )"""
 
         ##########################################
 
@@ -827,7 +1130,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         # gt_bbox_3d[:, 2] = gt_bbox_3d[:, 2] - 0.05  # Experiment
         gt_bbox_3d[:, 2] = gt_bbox_3d[:, 2] - 0.1  # Move the bbox slightly down in the z direction
         # gt_bbox_3d[:, 3:6] = gt_bbox_3d[:, 3:6] * 1.05 # Experiment
-        gt_bbox_3d[:, 3:6] = gt_bbox_3d[:, 3:6] * 1.1  # Slightly expand the bbox to wrap all object points
+        gt_bbox_3d[:, 3:6] = gt_bbox_3d[:, 3:6] * 1.2  # Slightly expand the bbox to wrap all object points
 
         ############################# cut out movable object points and masks ##########################
         points_in_boxes = points_in_boxes_cpu(torch.from_numpy(sensor_fused_pc.points.T[:, :3][np.newaxis, :, :]),
@@ -850,6 +1153,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         pc_with_semantic = np.concatenate([sensor_fused_pc.points.T[:, :3], points_label], axis=1)
 
         object_points_list = []  # creates an empty list to store points associated with each object
+        objects_points_list_sensor_ids = []
         j = 0
         # Iterate through each bounding box along the last dimension
         while j < points_in_boxes.shape[-1]:
@@ -857,8 +1161,10 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             object_points_mask = points_in_boxes[0][:, j].bool()
             # Extract points using mask to filter points
             object_points = sensor_fused_pc.points.T[object_points_mask]
+            object_points_sensor_ids = sensor_ids_points.T[object_points_mask]
             # Store the filtered points, Result is a list of arrays, where each element contains the points belonging to a particular object
             object_points_list.append(object_points)
+            objects_points_list_sensor_ids.append(object_points_sensor_ids)
             j = j + 1
 
         # shape: (1, Npoints, Nboxes)
@@ -891,14 +1197,22 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         points_mask = static_mask & ego_filter_mask
 
         pc_ego_unfiltered = sensor_fused_pc.points.T[points_mask]
-        print(f"Number of static points extracted: {pc_ego_unfiltered.shape}")
+        pc_ego_unfiltered_sensors = sensor_ids_points.T[points_mask]
+        print(f"Number of static points extracted: {pc_ego_unfiltered.shape} with sensor_ids {pc_ego_unfiltered_sensors.shape}")
 
         """for box_idx in range(gt_bbox_3d.shape[0]):
             num_in_box = points_in_boxes[0][:, box_idx].sum().item()
             print(f"Box {box_idx} contains {num_in_box} points")"""
 
         pc_with_semantic_ego_unfiltered = pc_with_semantic[points_mask]
-        print(f"Number of semantic static points extracted: {pc_with_semantic_ego_unfiltered.shape}")
+        pc_with_semantic_ego_unfiltered_sensors = sensor_ids_points.T[points_mask]
+        print(f"Number of semantic static points extracted: {pc_with_semantic_ego_unfiltered.shape} with sensor_ids {pc_with_semantic_ego_unfiltered_sensors.shape}")
+
+        """visualize_pointcloud_bbox(pc_with_semantic_ego_unfiltered,
+                                  boxes=boxes,
+                                  title=f"Fused filtered static sensor PC + BBoxes + Ego BBox - Frame {i}",
+                                  self_vehicle_range=self_range,
+                                  vis_self_vehicle=True)"""
 
         pc_ego = pc_ego_unfiltered.copy()
         pc_with_semantic_ego = pc_with_semantic_ego_unfiltered.copy()
@@ -981,9 +1295,13 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             "gt_bbox_3d": gt_bbox_3d,  # BBox in current frame's ego coords
             "object_tokens": object_tokens,
             "object_points_list": object_points_list,  # Raw object points in current ego frame
+            "object_points_list_sensor_ids": objects_points_list_sensor_ids,
             "raw_lidar_ego": sensor_fused_pc.points.T,
+            "raw_lidar_ego_sensor_ids": sensor_ids_points.T,
             "lidar_pc_ego_i": pc_ego_i_save,  # Filtered static points in CURRENT ego frame (i)
+            "lidar_pc_ego_sensor_ids": pc_ego_unfiltered_sensors,
             "lidar_pc_with_semantic_ego_i": pc_with_semantic_ego_i_save,
+            "lidar_pc_with_semantic_ego_sensor_ids": pc_with_semantic_ego_unfiltered_sensors,
             # Filtered semantic static points in CURRENT ego frame (i)
             "lidar_pc_ego_ref": pc_ego_ref_save,  # Filtered static points transformed to REFERENCE ego frame
             "lidar_pc_with_semantic_ego_ref": pc_with_semantic_ego_ref_save,
@@ -1024,17 +1342,15 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     # Use the correct key from the dictionary populated earlier
     unrefined_pc_ego_list = [frame_dict['lidar_pc_ego_i'] for frame_dict in dict_list]
     print(f"Extracted {len(unrefined_pc_ego_list)} static point clouds (in ego i frame).")
-    # Optional: Check shape of first element if list is not empty
-    # if unrefined_pc_ref_ego_list:
-    #     print(f"  Shape of first cloud: {unrefined_pc_ref_ego_list[0].shape}")
+
+    unrefined_pc_ego_list_sensor_ids = [frame_dict['lidar_pc_ego_sensor_ids'] for frame_dict in dict_list]
 
     # Extract semantic static points (already in ref ego frame, Features+1 x N format)
     # Use the correct key from the dictionary populated earlier
     unrefined_sem_pc_ego_list = [frame_dict['lidar_pc_with_semantic_ego_i'] for frame_dict in dict_list]
     print(f"Extracted {len(unrefined_sem_pc_ego_list)} semantic point clouds (in ego i frame).")
-    # Optional: Check shape of first element if list is not empty
-    # if unrefined_sem_pc_ref_ego_list:
-    #     print(f"  Shape of first semantic cloud: {unrefined_sem_pc_ref_ego_list[0].shape}")
+
+    unrefined_sem_pc_ego_list_sensor_ids = [frame_dict['lidar_pc_with_semantic_ego_sensor_ids'] for frame_dict in dict_list]
 
     pc_ego_combined_draw = np.concatenate(unrefined_pc_ego_list, axis=0)
     print(f"Pc ego i combined shape: {pc_ego_combined_draw.shape}")
@@ -1045,8 +1361,10 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
     unrefined_pc_ego_ref_list = [frame_dict['lidar_pc_ego_ref'] for frame_dict in dict_list]
     print(f"Extracted {len(unrefined_pc_ego_ref_list)} static point clouds (in ego ref frame).")
+    unrefined_pc_ego_ref_list_sensor_ids = [frame_dict['lidar_pc_ego_sensor_ids'] for frame_dict in dict_list]
     unrefined_sem_pc_ego_ref_list = [frame_dict['lidar_pc_with_semantic_ego_ref'] for frame_dict in dict_list]
     print(f"Extracted {len(unrefined_sem_pc_ego_ref_list)} semantic static point clouds (in ego ref frame).")
+    unrefined_sem_pc_ego_ref_list_sensor_ids = [frame_dict['lidar_pc_with_semantic_ego_sensor_ids'] for frame_dict in dict_list]
 
     pc_ego_ref_combined_draw = np.concatenate(unrefined_pc_ego_ref_list, axis=0)
     print(f"Pc ego ref combined shape: {pc_ego_ref_combined_draw.shape}")
@@ -1201,6 +1519,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     lidar_pc_with_semantic_list_for_concat = [pc for pc in refined_lidar_pc_with_semantic_list if
                                               pc.shape[1] > 0]  # Transpose to (N, Features) and filter empty
 
+
     if lidar_pc_list_for_concat:
         # Concatenate along points axis (axis=0)
         lidar_pc_final_global = np.concatenate(lidar_pc_list_for_concat, axis=0)
@@ -1209,6 +1528,10 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         lidar_pc_final_global = np.zeros((0, refined_lidar_pc_list[0].shape[0] if refined_lidar_pc_list else 3),
                                          dtype=np.float64)  # Empty array with correct feature count
         print("Concatenated refined static global points resulted in an empty array.")
+
+    lidar_pc_final_global_sensor_ids = np.concatenate(unrefined_pc_ego_ref_list_sensor_ids, axis=0)
+
+    assert lidar_pc_final_global.shape[0] == lidar_pc_final_global_sensor_ids.shape[0]
 
     # --- Visualization Part ---
 
@@ -1284,16 +1607,15 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             dtype=np.float64)  # Empty array with correct feature count
         print("Concatenated refined semantic global points resulted in an empty array.")
 
-        # --- Transpose final arrays IF the rest of your code expects (Features, N) ---
-        # Example:
-        # lidar_pc = lidar_pc_final_global.T
-        # lidar_pc_with_semantic = lidar_pc_with_semantic_final_global.T
-        # --- OR ---
-        # --- Modify the rest of your code to handle (N, Features) ---
-        # This depends on how 'lidar_pc' and 'lidar_pc_with_semantic' are used later.
-        # Assuming the rest of the code needs (Features, N) based on original structure:
+    lidar_pc_with_semantic_final_global_sensor_ids = np.concatenate(unrefined_sem_pc_ego_list_sensor_ids, axis=0)
+
+    assert lidar_pc_with_semantic_final_global.shape[0] == lidar_pc_with_semantic_final_global_sensor_ids.shape[0]
+
     lidar_pc = lidar_pc_final_global.T
     lidar_pc_with_semantic = lidar_pc_with_semantic_final_global.T
+
+    lidar_pc_sensor_ids = lidar_pc_final_global_sensor_ids
+    lidar_pc_with_semantic_sensor_ids = lidar_pc_with_semantic_final_global_sensor_ids
 
 
     if args.vis and args.vis_position == 'aggregated_frames_global_static':
@@ -1331,16 +1653,19 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
 
     object_points_dict = {}  # initialize an empty dictionary to hold aggregated object points
+    object_sids_dict = {}
     object_icp_voxel_size = config.get('object_icp_voxel_size', 0.1)  # Get object ICP voxel size from config
 
     print("\nAggregating object points...")
     for query_object_token in tqdm(object_token_zoo,
                                    desc="Aggregating Objects"):  # Loop through each unique object token
         canonical_segments_list = []
+        canonical_segments_sids_list = []
         for frame_dict in dict_list:  # iterates through all frames
             if query_object_token in frame_dict['object_tokens']:  # Check if the object exists in this frame
                 obj_idx = frame_dict['object_tokens'].index(query_object_token)  # Find its index
                 object_points = frame_dict['object_points_list'][obj_idx]  # retrieve raw object points
+                object_points_sids = frame_dict['object_points_list_sensor_ids'][obj_idx]
 
                 if object_points is not None and object_points.shape[0] > 0:
                     # Canonicalization: Translate to center and rotate based on box yaw
@@ -1352,69 +1677,14 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                         rotated_object_points = Rot.apply(translated_points)  # Canonical segment (N_seg, 3)
                         if rotated_object_points.shape[0] > 0:
                             canonical_segments_list.append(rotated_object_points)  # Add segment to the list
+                            canonical_segments_sids_list.append(object_points_sids)
 
-        # Check if any segments were collected
-        if not canonical_segments_list:
-            object_points_dict[query_object_token] = np.zeros((0, 3))  # Assign empty array
-            continue  # Skip to the next object token
-
-        # Conditionally Refine the collected segments using ICP >>>
-        segments_to_concatenate = canonical_segments_list
-        if args.icp_refinement_objects and len(canonical_segments_list) > 1:
-            # print(f"  Refining object {query_object_token} ({len(canonical_segments_list)} segments) with ICP...") # Optional verbose
-
-            MIN_ICP_POINTS = 10  # Min points required for a segment to participate in ICP
-
-            # 2a. Choose reference segment (e.g., the largest)
-            segment_lengths = [len(seg) for seg in canonical_segments_list]
-            reference_idx = np.argmax(segment_lengths)
-            reference_segment = canonical_segments_list[reference_idx]
-
-            # Only proceed if reference is usable
-            if reference_segment.shape[0] >= MIN_ICP_POINTS:
-                aligned_segments_list = [reference_segment]  # Start new list with the reference
-
-                # 2b. Align other segments TO the reference
-                for i, segment in enumerate(canonical_segments_list):
-                    if i == reference_idx:
-                        continue  # Skip the reference itself
-
-                    # Align only if source segment is also usable
-                    if segment.shape[0] >= MIN_ICP_POINTS:
-                        # print(f"   Aligning segment {i} ({segment.shape[0]} pts) to reference ({reference_segment.shape[0]} pts)...") # Optional
-                        try:
-                            # Perform ICP
-                            icp_transform_obj = icp_align(
-                                segment,  # Source (N_seg, 3)
-                                reference_segment,  # Target (N_ref, 3)
-                                init_trans=np.eye(4),
-                                voxel_size=object_icp_voxel_size
-                            )
-                            # Apply transformation
-                            xyz_seg = segment
-                            xyz_seg_homo = np.hstack((xyz_seg, np.ones((xyz_seg.shape[0], 1))))
-                            transformed_homo_seg = (icp_transform_obj @ xyz_seg_homo.T).T
-                            segment_aligned = transformed_homo_seg[:, :3]
-
-                            aligned_segments_list.append(segment_aligned)  # Add ALIGNED segment
-                        except Exception as e:
-                            print(
-                                f"   ICP failed for segment {i} of object {query_object_token}: {e}. Adding UNALIGNED segment.")
-                            aligned_segments_list.append(segment)  # Add original on failure
-                    else:
-                        # Keep small segments unaligned
-                        aligned_segments_list.append(segment)
-
-                # CRUCIAL: Point to the list containing aligned segments for concatenation
-                segments_to_concatenate = aligned_segments_list
-            # else: # Optional: Handle case where reference is too small
-            # print(f"  Skipping ICP refinement for {query_object_token}: Reference segment too small.")
-            # segments_to_concatenate remains canonical_segments_list
-
-        if segments_to_concatenate:  # Final check if the list is not empty
-            object_points_dict[query_object_token] = np.concatenate(segments_to_concatenate, axis=0)
+        if canonical_segments_list:
+            object_points_dict[query_object_token] = np.concatenate(canonical_segments_list, axis=0)
+            object_sids_dict[query_object_token] = np.concatenate(canonical_segments_sids_list, axis=0)
         else:
-            object_points_dict[query_object_token] = np.zeros((0, 3))
+            object_points_dict[query_object_token] = np.zeros((0, 3), dtype=float)
+            object_sids_dict[query_object_token] = np.zeros((0,), dtype=int)
 
 
     object_data = []  # Stores all unique objects across frames
@@ -1423,6 +1693,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         obj = {
             "token": token,
             "points": object_points_dict[token][:, :3],  # Canonicalized x, y, z
+            "points_sids": object_sids_dict[token],
             "semantic": object_semantic[idx]  # Integer category
         }
         object_data.append(obj)
@@ -1447,13 +1718,24 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         point_cloud = lidar_pc[:3,
                       :]  # extract transformed static points, T to switch dims from (3,N) to (N, 3)
         point_cloud_with_semantic = lidar_pc_with_semantic  # retrieves transformed semantic points with labels (N, 4): [x, y, z, label]
-        print(f"Original point_cloud: {point_cloud.shape}")
-        print(f"Original semantic point_cloud: {point_cloud_with_semantic.shape}")
+        point_cloud_sensor_ids = lidar_pc_sensor_ids
+        point_cloud_with_semantic_sensor_ids = lidar_pc_with_semantic_sensor_ids
+        print(f"Original point_cloud: {point_cloud.shape} with sensor ids: {point_cloud_sensor_ids.shape}")
+        print(f"Original semantic point_cloud: {point_cloud_with_semantic.shape} with sensor ids: {point_cloud_with_semantic_sensor_ids.shape}")
 
         # === Transform back to ego frame ===
         sample = truckscenes.get('sample', frame_dict['sample_token'])
         ego_pose = truckscenes.getclosest('ego_pose', sample['timestamp'])
         ego_from_global = transform_matrix(ego_pose['translation'], Quaternion(ego_pose['rotation']), inverse=True)
+
+        sensor_origins = []
+        for idx, sensor in enumerate(sensors):
+            sd = trucksc.get('sample_data', sample['data'][sensor])
+            cs = trucksc.get('calibrated_sensor', sd['calibrated_sensor_token'])
+
+            T_s_to_ego = transform_matrix(cs['translation'], Quaternion(cs['rotation']), inverse=False)
+            sensor_origins.append(T_s_to_ego[:3, 3])
+        sensor_origins = np.stack(sensor_origins, axis=0)  # shape (S,3)
 
         if args.icp_refinement:
             T_ref_from_k = poses_kiss_icp[i]
@@ -1502,14 +1784,16 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             point_cloud_with_semantic = np.zeros((num_sem_rows, 0), dtype=lidar_pc_with_semantic.dtype)
 
         # Prints after transformation:
-        print(f"Ego point_cloud shape: {point_cloud.shape}")
+        print(f"Ego point_cloud shape: {point_cloud.shape} with sensor ids: {point_cloud_sensor_ids.shape}")
         # Optional: print first few points' ego coords: print(point_cloud[:,:5])
-        print(f"Ego semantic point_cloud shape: {point_cloud_with_semantic.shape}")
+        print(f"Ego semantic point_cloud shape: {point_cloud_with_semantic.shape} with sensor ids: {point_cloud_with_semantic_sensor_ids.shape}")
         # Optional: print first few points' ego coords + labels: print(point_cloud_with_semantic[:,:5])
 
         # --- Check: Do shapes still match? ---
         assert point_cloud.shape[1] == point_cloud_with_semantic.shape[1], \
             f"Ego point counts mismatch after transform: {point_cloud.shape[1]} vs {point_cloud_with_semantic.shape[1]}"
+
+        assert point_cloud.shape[1] == point_cloud_sensor_ids.shape[0]
 
         ################## load bbox of target frame ##############
         sample = truckscenes.get('sample', frame_dict['sample_token'])
@@ -1562,9 +1846,9 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                 # --- CHANGE: Use UNKNOWN_LEARNING_INDEX ---
                 converted_object_category.append(UNKNOWN_LEARNING_INDEX)
 
-        labels_array = np.array(converted_object_category).reshape(-1, 1)
+        """labels_array = np.array(converted_object_category).reshape(-1, 1)
 
-        """# Check if the number of labels matches the number of boxes
+        # Check if the number of labels matches the number of boxes
         if locs.shape[0] == labels_array.shape[0]:
             # Concatenate geometric data AND the labels array
             # Resulting shape will be (N, 3+3+1+1) = (N, 8)
@@ -1596,13 +1880,16 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
         ################## bbox placement ##############
         object_points_list = []  # Final transformed points for scene
+        object_points_sids_list = []
         object_semantic_list = []  # Final semantic-labeled points for scene
+        object_semantic_sids_list = []
 
         for j, object_token in enumerate(frame_dict['object_tokens']):
             # Find matching object entry
             for obj in object_data:
                 if object_token == obj["token"]:
                     points = obj["points"]  # Canonical (x, y, z)
+                    points_sids = obj["points_sids"]
 
                     # Rotate and translate object points to place back into current scene
                     Rot = Rotation.from_euler('z', rots[j], degrees=False)
@@ -1617,6 +1904,10 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                             torch.from_numpy(gt_bbox_3d[j:j + 1][np.newaxis, :])
                         )
                         points = points[points_in_boxes[0, :, 0].bool()]
+                        points_sids = points_sids[points_in_boxes[0, :, 0].bool()]
+
+                        assert points.shape[0] == points_sids.shape[0]
+
                         filtered_count = points.shape[0]
                         if original_count > filtered_count:
                             print(
@@ -1626,10 +1917,12 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                     # Append only if points remain
                     if points.shape[0] > 0:
                         object_points_list.append(points)
+                        object_points_sids_list.append(points_sids)
 
                         semantics = np.ones((points.shape[0], 1)) * obj["semantic"]
                         points_with_semantics = np.concatenate([points, semantics], axis=1)
                         object_semantic_list.append(points_with_semantics)
+                        object_semantic_sids_list.append(points_sids)
 
                     break  # No need to check further once matched
 
@@ -1643,7 +1936,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         # Combine Scene Points with Object Points
         try:  # avoid concatenate an empty array
             temp = np.concatenate(object_points_list)
-
+            temp_sids = np.concatenate(object_points_sids_list)
             """# ---- EXPORT temp points ----
             np.save(output_filepath_temp, temp)
             print(f"Saved temp object points for frame {i} to {output_filepath_temp}")
@@ -1651,10 +1944,15 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             # scene_points = point_cloud.T
             scene_points = np.concatenate(
                 [point_cloud.T, temp])  # Merge static scene points and object points
+
+            scene_points_sids = np.concatenate([point_cloud_sensor_ids, temp_sids])
         except:
+            print("Error concatenating static and object points.")
             scene_points = point_cloud  # If no object points, only use static scene points
+            scene_points_sids = point_cloud_sensor_ids
         try:
             temp = np.concatenate(object_semantic_list)
+            temp_sids = np.concatenate(object_semantic_sids_list)
             """# ---- EXPORT temp points ----
             np.save(output_filepath_sem_temp, temp)
             print(f"Saved temp object points for frame {i} to {output_filepath_sem_temp}")
@@ -1662,13 +1960,19 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             # scene_semantic_points = point_cloud_with_semantic.T
             scene_semantic_points = np.concatenate(
                 [point_cloud_with_semantic.T, temp])  # Merge semantic points from objects and static scenes
+            scene_semantic_points_sids = np.concatenate([point_cloud_with_semantic_sensor_ids, temp_sids])
         except:
+            print("Error concatenating semantic static and object points.")
             scene_semantic_points = point_cloud_with_semantic  # If no object points, only use static scene points
+            scene_semantic_points_sids = point_cloud_with_semantic_sensor_ids
+
+        assert scene_points_sids.shape == scene_semantic_points_sids.shape
 
         print(f"Scene points before applying range filtering: {scene_points.shape}")
         mask = in_range_mask(scene_points, pc_range)
 
         scene_points = scene_points[mask]
+        scene_points_sids = scene_points_sids[mask]
         print(f"Scene points after applying range filtering: {scene_points.shape}")
 
         visualize_pointcloud_bbox(scene_points,
@@ -1682,6 +1986,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         mask = in_range_mask(scene_semantic_points, pc_range)
 
         scene_semantic_points = scene_semantic_points[mask]  # Filter points within a spatial range
+        scene_semantic_points_sids = scene_semantic_points_sids[mask]
         print(f"Scene semantic points after applying range filtering: {scene_semantic_points.shape}")
 
         if args.filter_location in ['final', 'all'] and args.filter_mode != 'none':
@@ -1835,6 +2140,62 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                 print("No semantic points available. Occupancy grid will be empty/free.")
                 # occupancy_grid already initialized to FREE, dense_voxels_with_semantic_voxelcoords is empty
             else:
+
+                print("Creating Lidar visibility masks")
+                # pick the proper origin for each LiDAR hit by indexing with your per‐point sensor‐ID
+                #    scene_points_sids is (N,) telling which sensor produced each point
+                points_origin = sensor_origins[scene_semantic_points_sids]  # (N,3)
+                print(points_origin.shape)
+                points_label = scene_semantic_points[:, 3].astype(int)
+                print(points_label.shape)
+                points = scene_semantic_points[:, :3]
+                print(points.shape)
+
+                if isinstance(voxel_size, (int, float)):
+                    voxel_size_masks = [voxel_size, voxel_size, voxel_size]
+
+                voxel_state, voxel_label = calculate_lidar_visibility(
+                    points=scene_semantic_points[:, :3],  # (N,3) hits in ego–i
+                    points_origin=points_origin,  # (N,3) ray‐starts in ego–i
+                    points_label=points_label,  # (N,) semantic of each hit
+                    pc_range=pc_range,  # [xmin,ymin,zmin,xmax,ymax,zmax]
+                    voxel_size=voxel_size_masks,  # [vx,vy,vz]
+                    spatial_shape=occ_size  # (H,W,Z)
+                )
+
+                print(voxel_state.shape)
+                print(voxel_label.shape)
+
+                print("Finished Lidar visibility masks")
+
+                print("Visualizing with Semantics, Free, and Unobserved")
+                visualize_occupancy_o3d(
+                    voxel_state,
+                    voxel_label,
+                    pc_range=pc_range,
+                    voxel_size=voxel_size_masks,  # Pass as array
+                    class_color_map=CLASS_COLOR_MAP,
+                    default_color=DEFAULT_COLOR,
+                    show_semantics=True,
+                    show_free=True,
+                    show_unobserved=False,
+                    point_size=5.0
+                )
+
+                """print("\nVisualizing Occupied Only (Red)")
+                visualize_occupancy_o3d(
+                    voxel_state,
+                    voxel_label,
+                    pc_range=pc_range,
+                    voxel_size=voxel_size_masks,
+                    class_color_map=CLASS_COLOR_MAP,
+                    default_color=DEFAULT_COLOR,
+                    show_semantics=False,
+                    show_free=False,
+                    show_unobserved=False,
+                    point_size=5.0
+                )"""
+
                 # Directly use scene_semantic_points (which are XYZL)
                 # Convert their world XYZ to voxel coordinates, keep their labels
                 points_to_voxelize = scene_semantic_points.copy()
