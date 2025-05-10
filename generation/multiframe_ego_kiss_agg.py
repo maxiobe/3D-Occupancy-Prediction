@@ -818,7 +818,7 @@ def ray_casting_numba(ray_start, ray_end, pc_range, voxel_size, spatial_shape, E
 
 
 def calculate_lidar_visibility(points, points_origin, points_label,
-                               pc_range, voxel_size, spatial_shape):
+                               pc_range, voxel_size, spatial_shape, occupancy_grid, FREE_LEARNING_INDEX):
     """
     points:        (N,3) array of LiDAR hits
     points_origin:(N,3) corresponding sensor origins
@@ -839,16 +839,20 @@ def calculate_lidar_visibility(points, points_origin, points_label,
     for i in range(points.shape[0]):
         if i % 10000 == 0:
             print(f"Processed points {i}...")
-        start = points[i]
-        end = points_origin[i]
+        start = points_origin[i]
+        end = points[i]
         # direct hit voxel
-        tgt = ((start - pc_range[:3]) / voxel_size).astype(int)
-        if np.all((0 <= tgt) & (tgt < spatial_shape)):
-            voxel_occ_count[tuple(tgt)] += 1
-            voxel_label[tuple(tgt)] = int(points_label[i])
+        actual_hit_voxel_indices = ((end - pc_range[:3]) / voxel_size).astype(int)
+        if np.all((0 <= actual_hit_voxel_indices) & (actual_hit_voxel_indices < spatial_shape)):
+            voxel_occ_count[tuple(actual_hit_voxel_indices)] += 1
+            voxel_label[tuple(actual_hit_voxel_indices)] = int(points_label[i])
         # walk the ray up to the point
         for vox in ray_casting(start, end, pc_range, voxel_size, spatial_shape):
-            voxel_free_count[vox] += 1
+            occupancy_grid_value = occupancy_grid[vox]
+            if occupancy_grid_value != FREE_LEARNING_INDEX:
+                break
+            else:
+                voxel_free_count[vox] += 1
 
     # build state mask
     voxel_state = np.full(spatial_shape, NOT_OBS, int)
@@ -2142,59 +2146,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             else:
 
                 print("Creating Lidar visibility masks")
-                # pick the proper origin for each LiDAR hit by indexing with your per‐point sensor‐ID
-                #    scene_points_sids is (N,) telling which sensor produced each point
-                points_origin = sensor_origins[scene_semantic_points_sids]  # (N,3)
-                print(points_origin.shape)
-                points_label = scene_semantic_points[:, 3].astype(int)
-                print(points_label.shape)
-                points = scene_semantic_points[:, :3]
-                print(points.shape)
 
-                if isinstance(voxel_size, (int, float)):
-                    voxel_size_masks = [voxel_size, voxel_size, voxel_size]
-
-                voxel_state, voxel_label = calculate_lidar_visibility(
-                    points=scene_semantic_points[:, :3],  # (N,3) hits in ego–i
-                    points_origin=points_origin,  # (N,3) ray‐starts in ego–i
-                    points_label=points_label,  # (N,) semantic of each hit
-                    pc_range=pc_range,  # [xmin,ymin,zmin,xmax,ymax,zmax]
-                    voxel_size=voxel_size_masks,  # [vx,vy,vz]
-                    spatial_shape=occ_size  # (H,W,Z)
-                )
-
-                print(voxel_state.shape)
-                print(voxel_label.shape)
-
-                print("Finished Lidar visibility masks")
-
-                print("Visualizing with Semantics, Free, and Unobserved")
-                visualize_occupancy_o3d(
-                    voxel_state,
-                    voxel_label,
-                    pc_range=pc_range,
-                    voxel_size=voxel_size_masks,  # Pass as array
-                    class_color_map=CLASS_COLOR_MAP,
-                    default_color=DEFAULT_COLOR,
-                    show_semantics=True,
-                    show_free=True,
-                    show_unobserved=False,
-                    point_size=5.0
-                )
-
-                """print("\nVisualizing Occupied Only (Red)")
-                visualize_occupancy_o3d(
-                    voxel_state,
-                    voxel_label,
-                    pc_range=pc_range,
-                    voxel_size=voxel_size_masks,
-                    class_color_map=CLASS_COLOR_MAP,
-                    default_color=DEFAULT_COLOR,
-                    show_semantics=False,
-                    show_free=False,
-                    show_unobserved=False,
-                    point_size=5.0
-                )"""
 
                 # Directly use scene_semantic_points (which are XYZL)
                 # Convert their world XYZ to voxel coordinates, keep their labels
@@ -2231,6 +2183,50 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                         dense_voxels_with_semantic_voxelcoords[:, 1],
                         dense_voxels_with_semantic_voxelcoords[:, 2]
                     ] = dense_voxels_with_semantic_voxelcoords[:, 3]
+
+                # pick the proper origin for each LiDAR hit by indexing with your per‐point sensor‐ID
+                #    scene_points_sids is (N,) telling which sensor produced each point
+                points_origin = sensor_origins[scene_semantic_points_sids]  # (N,3)
+                print(points_origin.shape)
+                points_label = scene_semantic_points[:, 3].astype(int)
+                print(points_label.shape)
+                points = scene_semantic_points[:, :3]
+                print(points.shape)
+
+                if isinstance(voxel_size, (int, float)):
+                    voxel_size_masks = [voxel_size, voxel_size, voxel_size]
+
+                voxel_state, voxel_label = calculate_lidar_visibility(
+                    points=scene_semantic_points[:, :3],  # (N,3) hits in ego–i
+                    points_origin=points_origin,  # (N,3) ray‐starts in ego–i
+                    points_label=points_label,  # (N,) semantic of each hit
+                    pc_range=pc_range,  # [xmin,ymin,zmin,xmax,ymax,zmax]
+                    voxel_size=voxel_size_masks,  # [vx,vy,vz]
+                    spatial_shape=occ_size,  # (H,W,Z)
+                    occupancy_grid=occupancy_grid,
+                    FREE_LEARNING_INDEX=FREE_LEARNING_INDEX,
+                )
+
+                print(voxel_state.shape)
+                print(voxel_label.shape)
+
+                print("Finished Lidar visibility masks")
+
+                print("Visualizing with Semantics and Free")
+                visualize_occupancy_o3d(
+                    voxel_state,
+                    voxel_label,
+                    pc_range=pc_range,
+                    voxel_size=voxel_size_masks,  # Pass as array
+                    class_color_map=CLASS_COLOR_MAP,
+                    default_color=DEFAULT_COLOR,
+                    show_semantics=True,
+                    show_free=True,
+                    show_unobserved=False,
+                    point_size=5.0
+                )
+
+
 
                 occupied_mask = occupancy_grid != FREE_LEARNING_INDEX
                 total_occupied_voxels = np.sum(occupied_mask)
