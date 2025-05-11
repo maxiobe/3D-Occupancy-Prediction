@@ -32,8 +32,9 @@ from kiss_icp.pipeline import OdometryPipeline
 from pathlib import Path
 
 from custom_datasets import InMemoryDataset
+import math
 
-#from numba import njit, prange
+from numba import njit, prange, cuda
 
 
 CLASS_COLOR_MAP = {
@@ -757,66 +758,6 @@ def ray_casting(ray_start, ray_end, pc_range, voxel_size, spatial_shape, EPS=1e-
         tMax[m] += tDelta[m]
     return visited
 
-"""
-@njit
-def ray_casting_numba(ray_start, ray_end, pc_range, voxel_size, spatial_shape, EPS=1e-9, DISTANCE=0.5):
-    new_start = ray_start - pc_range[:3]
-    new_end   = ray_end   - pc_range[:3]
-    ray = new_end - new_start
-    step = np.sign(ray).astype(np.int32)
-
-    tDelta = np.empty(3, np.float64)
-    cur_voxel  = np.empty(3, np.int32)
-    last_voxel = np.empty(3, np.int32)
-    tMax = np.empty(3, np.float64)
-
-    # initialize
-    for k in range(3):
-        if ray[k] != 0.0:
-            tDelta[k] = (step[k] * voxel_size[k]) / ray[k]
-        else:
-            tDelta[k] = np.finfo(np.float64).max
-
-        new_start[k] += step[k] * voxel_size[k] * EPS
-        new_end[k]   -= step[k] * voxel_size[k] * EPS
-
-        cur_voxel[k]  = int(np.floor(new_start[k] / voxel_size[k]))
-        last_voxel[k] = int(np.floor(new_end[k]   / voxel_size[k]))
-
-    # compute initial tMax
-    for k in range(3):
-        if ray[k] != 0.0:
-            coord = cur_voxel[k] * voxel_size[k]
-            if step[k] < 0 and coord < new_start[k]:
-                boundary = coord
-            else:
-                boundary = coord + step[k] * voxel_size[k]
-            tMax[k] = (boundary - new_start[k]) / ray[k]
-        else:
-            tMax[k] = np.finfo(np.float64).max
-
-    visited = []
-    while (step[0] * (cur_voxel[0] - last_voxel[0]) < DISTANCE and
-           step[1] * (cur_voxel[1] - last_voxel[1]) < DISTANCE and
-           step[2] * (cur_voxel[2] - last_voxel[2]) < DISTANCE):
-        # record
-        if (0 <= cur_voxel[0] < spatial_shape[0] and
-            0 <= cur_voxel[1] < spatial_shape[1] and
-            0 <= cur_voxel[2] < spatial_shape[2]):
-            visited.append((cur_voxel[0], cur_voxel[1], cur_voxel[2]))
-        # step to next voxel
-        m = 0
-        if tMax[1] < tMax[m]:
-            m = 1
-        if tMax[2] < tMax[m]:
-            m = 2
-        cur_voxel[m] += step[m]
-        tMax[m] += tDelta[m]
-
-    return visited"""
-
-
-
 def calculate_lidar_visibility(points, points_origin, points_label,
                                pc_range, voxel_size, spatial_shape, occupancy_grid, FREE_LEARNING_INDEX):
     """
@@ -861,40 +802,276 @@ def calculate_lidar_visibility(points, points_origin, points_label,
     return voxel_state, voxel_label
 
 
-"""@njit(parallel=True)
-def calculate_lidar_visibility_numba(points, origins, labels,
-                                     pc_range, voxel_size, spatial_shape):
-    H, W, Z = spatial_shape
-    FREE_LABEL = -1
-    NOT_OBS, FREE, OCC = 0, 1, 2
+# --- Numba CUDA Device Function for Ray Casting Steps ---
+@cuda.jit(device=True)
+def _ray_casting_gpu_step_logic(
+        # Inputs for one ray
+        ray_start_x, ray_start_y, ray_start_z,  # Origin of this ray (sensor)
+        ray_end_x, ray_end_y, ray_end_z,  # Target of this ray (LiDAR hit)
+        # Grid parameters
+        pc_range_min_x, pc_range_min_y, pc_range_min_z,
+        voxel_sx, voxel_sy, voxel_sz,  # Voxel sizes
+        grid_dx, grid_dy, grid_dz,  # Grid dimensions in voxels
+        # Pre-computed occupancy for early exit
+        occupancy_grid_gpu,  # Read-only, shows where aggregated matter is
+        FREE_LEARNING_INDEX_CONST,  # Make sure this is the correct constant name
+        # Output array to update
+        voxel_free_count_gpu,  # This will be updated atomically
+        EPS, DISTANCE  # Constants from your ray_casting
+):
+    # --- Inline DDA logic from your ray_casting function ---
 
-    # pre-allocate
-    voxel_occ_count  = np.zeros((H, W, Z), np.int32)
-    free_count = np.zeros((H, W, Z), np.int32)
-    occ_label  = np.full((H, W, Z), FREE_LABEL, np.int32)
+    new_start_x = ray_start_x - pc_range_min_x
+    new_start_y = ray_start_y - pc_range_min_y
+    new_start_z = ray_start_z - pc_range_min_z
 
-    N = points.shape[0]
-    for i in prange(N):
-        start = points[i]
-        end   = origins[i]
-        tgt = ((start - pc_range[:3]) / voxel_size).astype(np.int32)
+    new_end_x = ray_end_x - pc_range_min_x
+    new_end_y = ray_end_y - pc_range_min_y
+    new_end_z = ray_end_z - pc_range_min_z
 
-        # direct hit
-        if (0 <= tgt[0] < H and 0 <= tgt[1] < W and 0 <= tgt[2] < Z):
-            occ_count[tgt[0], tgt[1], tgt[2]] += 1
-            occ_label[tgt[0], tgt[1], tgt[2]] = labels[i]
+    ray_vx = new_end_x - new_start_x
+    ray_vy = new_end_y - new_start_y
+    ray_vz = new_end_z - new_start_z
 
-        # walk the ray
-        voxels = ray_casting_numba(start, end, pc_range, voxel_size, spatial_shape)
-        for (x,y,z) in voxels:
-            free_count[x,y,z] += 1
+    step_ix, step_iy, step_iz = 0, 0, 0
+    if ray_vx > 0:
+        step_ix = 1
+    elif ray_vx < 0:
+        step_ix = -1
+    if ray_vy > 0:
+        step_iy = 1
+    elif ray_vy < 0:
+        step_iy = -1
+    if ray_vz > 0:
+        step_iz = 1
+    elif ray_vz < 0:
+        step_iz = -1
 
-    # build final state mask if you want
-    # state = np.zeros((H,W,Z), np.int32)
-    # state[free_count>0] = FREE
-    # state[occ_count>0] = OCC
+    t_delta_x = float('inf')
+    if ray_vx != 0: t_delta_x = (step_ix * voxel_sx) / ray_vx
+    t_delta_y = float('inf')
+    if ray_vy != 0: t_delta_y = (step_iy * voxel_sy) / ray_vy
+    t_delta_z = float('inf')
+    if ray_vz != 0: t_delta_z = (step_iz * voxel_sz) / ray_vz
 
-    return occ_count, free_count, occ_label"""
+    # Nudge
+    adj_start_x = new_start_x + step_ix * voxel_sx * EPS
+    adj_start_y = new_start_y + step_iy * voxel_sy * EPS
+    adj_start_z = new_start_z + step_iz * voxel_sz * EPS
+
+    adj_end_x = new_end_x - step_ix * voxel_sx * EPS
+    adj_end_y = new_end_y - step_iy * voxel_sy * EPS
+    adj_end_z = new_end_z - step_iz * voxel_sz * EPS
+
+    cur_vox_ix = int(math.floor(adj_start_x / voxel_sx))
+    cur_vox_iy = int(math.floor(adj_start_y / voxel_sy))
+    cur_vox_iz = int(math.floor(adj_start_z / voxel_sz))
+
+    last_vox_ix = int(math.floor(adj_end_x / voxel_sx))
+    last_vox_iy = int(math.floor(adj_end_y / voxel_sy))
+    last_vox_iz = int(math.floor(adj_end_z / voxel_sz))
+
+    t_max_x = float('inf')
+    if ray_vx != 0:
+        coord_x = float(cur_vox_ix * voxel_sx)
+        boundary_x = coord_x + step_ix * voxel_sx if not (step_ix < 0 and coord_x < adj_start_x) else coord_x
+        t_max_x = (boundary_x - adj_start_x) / ray_vx
+
+    t_max_y = float('inf')
+    if ray_vy != 0:
+        coord_y = float(cur_vox_iy * voxel_sy)
+        boundary_y = coord_y + step_iy * voxel_sy if not (step_iy < 0 and coord_y < adj_start_y) else coord_y
+        t_max_y = (boundary_y - adj_start_y) / ray_vy
+
+    t_max_z = float('inf')
+    if ray_vz != 0:
+        coord_z = float(cur_vox_iz * voxel_sz)
+        boundary_z = coord_z + step_iz * voxel_sz if not (step_iz < 0 and coord_z < adj_start_z) else coord_z
+        t_max_z = (boundary_z - adj_start_z) / ray_vz
+
+    max_iterations = grid_dx + grid_dy + grid_dz + 3  # Max iterations for safety
+
+    for _ in range(max_iterations):
+        term_x = True if step_ix == 0 else (step_ix * (cur_vox_ix - last_vox_ix) >= DISTANCE)
+        term_y = True if step_iy == 0 else (step_iy * (cur_vox_iy - last_vox_iy) >= DISTANCE)
+        term_z = True if step_iz == 0 else (step_iz * (cur_vox_iz - last_vox_iz) >= DISTANCE)
+        if term_x and term_y and term_z:
+            break
+
+        actual_hit_vx = int(math.floor((ray_end_x - pc_range_min_x) / voxel_sx))
+        actual_hit_vy = int(math.floor((ray_end_y - pc_range_min_y) / voxel_sy))
+        actual_hit_vz = int(math.floor((ray_end_z - pc_range_min_z) / voxel_sz))
+
+        is_current_voxel_the_actual_hit = (cur_vox_ix == actual_hit_vx and \
+                                           cur_vox_iy == actual_hit_vy and \
+                                           cur_vox_iz == actual_hit_vz)
+
+        if not is_current_voxel_the_actual_hit:
+            if (0 <= cur_vox_ix < grid_dx and
+                    0 <= cur_vox_iy < grid_dy and
+                    0 <= cur_vox_iz < grid_dz):
+
+                if occupancy_grid_gpu[cur_vox_ix, cur_vox_iy, cur_vox_iz] != FREE_LEARNING_INDEX_CONST:
+                    return  # Ray hit an obstruction
+                else:
+                    cuda.atomic.add(voxel_free_count_gpu, (cur_vox_ix, cur_vox_iy, cur_vox_iz), 1)
+            else:  # Current voxel out of bounds
+                return
+
+        # Step to next voxel
+        if t_max_x < t_max_y:
+            if t_max_x < t_max_z:
+                cur_vox_ix += step_ix
+                if not (0 <= cur_vox_ix < grid_dx): return
+                t_max_x += t_delta_x
+            else:
+                cur_vox_iz += step_iz
+                if not (0 <= cur_vox_iz < grid_dz): return
+                t_max_z += t_delta_z
+        else:
+            if t_max_y < t_max_z:
+                cur_vox_iy += step_iy
+                if not (0 <= cur_vox_iy < grid_dy): return
+                t_max_y += t_delta_y
+            else:
+                cur_vox_iz += step_iz
+                if not (0 <= cur_vox_iz < grid_dz): return
+                t_max_z += t_delta_z
+
+
+# --- Main Numba CUDA Kernel ---
+@cuda.jit
+def visibility_kernel(
+        points_gpu,  # (N,3) LiDAR hits
+        points_origin_gpu,  # (N,3) Sensor origins
+        points_label_gpu,  # (N,) Semantic labels for hits
+        pc_range_min_gpu,  # (3,) [xmin, ymin, zmin] - expecting np.array
+        voxel_size_gpu,  # (3,) [vx, vy, vz] - expecting np.array
+        spatial_shape_gpu,  # (3,) [Dx, Dy, Dz] - expecting np.array (int32)
+        occupancy_grid_gpu,  # (Dx,Dy,Dz) Pre-computed, read-only (uint8)
+        FREE_LEARNING_INDEX_CONST_UINT8,  # Scalar (uint8)
+        voxel_occ_count_out_gpu,  # (Dx,Dy,Dz) for writing (int32)
+        voxel_free_count_out_gpu,  # (Dx,Dy,Dz) for writing (int32)
+        voxel_label_out_gpu,  # (Dx,Dy,Dz) for writing (int32)
+        FREE_LABEL_CONST_FOR_INIT_INT32,  # Scalar (int32, e.g. -1)
+        EPS_CONST, DISTANCE_CONST  # Scalars (float64)
+):
+    i = cuda.grid(1)
+    if i >= points_gpu.shape[0]:
+        return
+
+    ray_start_x = points_origin_gpu[i, 0]
+    ray_start_y = points_origin_gpu[i, 1]
+    ray_start_z = points_origin_gpu[i, 2]
+
+    ray_end_x = points_gpu[i, 0]
+    ray_end_y = points_gpu[i, 1]
+    ray_end_z = points_gpu[i, 2]
+
+    point_label = points_label_gpu[i]  # This is int32
+
+    # Grid parameters from input arrays
+    pc_min_x, pc_min_y, pc_min_z = pc_range_min_gpu[0], pc_range_min_gpu[1], pc_range_min_gpu[2]
+    voxel_sx, voxel_sy, voxel_sz = voxel_size_gpu[0], voxel_size_gpu[1], voxel_size_gpu[2]
+    grid_dx, grid_dy, grid_dz = spatial_shape_gpu[0], spatial_shape_gpu[1], spatial_shape_gpu[2]
+
+    # --- 1. Mark Occupied Voxel (for the actual LiDAR hit 'ray_end') ---
+    actual_hit_vx = int(math.floor((ray_end_x - pc_min_x) / voxel_sx))
+    actual_hit_vy = int(math.floor((ray_end_y - pc_min_y) / voxel_sy))
+    actual_hit_vz = int(math.floor((ray_end_z - pc_min_z) / voxel_sz))
+
+    if (0 <= actual_hit_vx < grid_dx and
+            0 <= actual_hit_vy < grid_dy and
+            0 <= actual_hit_vz < grid_dz):
+        cuda.atomic.add(voxel_occ_count_out_gpu, (actual_hit_vx, actual_hit_vy, actual_hit_vz), 1)
+        voxel_label_out_gpu[actual_hit_vx, actual_hit_vy, actual_hit_vz] = point_label  # Direct write (last wins)
+
+    # --- 2. Perform Ray Casting ---
+    _ray_casting_gpu_step_logic(
+        ray_start_x, ray_start_y, ray_start_z,
+        ray_end_x, ray_end_y, ray_end_z,
+        pc_min_x, pc_min_y, pc_min_z,
+        voxel_sx, voxel_sy, voxel_sz,
+        grid_dx, grid_dy, grid_dz,
+        occupancy_grid_gpu,
+        FREE_LEARNING_INDEX_CONST_UINT8,  # Pass the constant for comparison
+        voxel_free_count_out_gpu,
+        EPS_CONST, DISTANCE_CONST
+    )
+
+
+# --- Host Function to Manage GPU Execution ---
+def calculate_lidar_visibility_gpu_host(
+        points_cpu, points_origin_cpu, points_label_cpu,
+        pc_range_cpu_list,  # Original list [xmin,ymin,zmin,xmax,ymax,zmax]
+        voxel_size_cpu_scalar,  # Original scalar voxel size
+        spatial_shape_cpu_list,  # Original list [Dx,Dy,Dz]
+        occupancy_grid_cpu,  # (Dx,Dy,Dz) np.uint8
+        FREE_LEARNING_INDEX_cpu,  # scalar int/uint8 for free space semantic label
+        FREE_LABEL_placeholder_cpu  # scalar int (e.g., -1 for internal init)
+):
+    num_points = points_cpu.shape[0]
+    if num_points == 0:
+        voxel_state = np.full(tuple(spatial_shape_cpu_list), STATE_UNOBSERVED, dtype=np.uint8)
+        voxel_label = np.full(tuple(spatial_shape_cpu_list), FREE_LEARNING_INDEX_cpu, dtype=np.uint8)
+        return voxel_state, voxel_label
+
+    # Prepare data for GPU (ensure contiguous and correct types)
+    points_gpu_data = cuda.to_device(np.ascontiguousarray(points_cpu, dtype=np.float64))
+    points_origin_gpu_data = cuda.to_device(np.ascontiguousarray(points_origin_cpu, dtype=np.float64))
+    points_label_gpu_data = cuda.to_device(np.ascontiguousarray(points_label_cpu, dtype=np.int32))
+
+    pc_range_min_gpu_data = cuda.to_device(np.ascontiguousarray(pc_range_cpu_list[:3], dtype=np.float64))
+    voxel_size_gpu_data = cuda.to_device(np.array([voxel_size_cpu_scalar] * 3, dtype=np.float64))
+    spatial_shape_gpu_data = cuda.to_device(np.array(spatial_shape_cpu_list, dtype=np.int32))
+
+    occupancy_grid_gpu_data = cuda.to_device(np.ascontiguousarray(occupancy_grid_cpu, dtype=np.uint8))
+
+    # Output arrays on GPU
+    voxel_occ_count_gpu = cuda.to_device(np.zeros(tuple(spatial_shape_cpu_list), dtype=np.int32))
+    voxel_free_count_gpu = cuda.to_device(np.zeros(tuple(spatial_shape_cpu_list), dtype=np.int32))
+    voxel_label_out_gpu = cuda.to_device(
+        np.full(tuple(spatial_shape_cpu_list), np.int32(FREE_LABEL_placeholder_cpu), dtype=np.int32))
+
+    # Kernel launch configuration
+    threads_per_block = 256
+    blocks_per_grid = (num_points + (threads_per_block - 1)) // threads_per_block
+
+    EPS_CONST_val = 1e-9  # Standard DDA constant
+    DISTANCE_CONST_val = 0.5  # Standard DDA constant
+
+    print(f"Launching GPU kernel: {blocks_per_grid} blocks, {threads_per_block} threads/block for {num_points} points.")
+    visibility_kernel[blocks_per_grid, threads_per_block](
+        points_gpu_data, points_origin_gpu_data, points_label_gpu_data,
+        pc_range_min_gpu_data, voxel_size_gpu_data, spatial_shape_gpu_data,
+        occupancy_grid_gpu_data,
+        np.uint8(FREE_LEARNING_INDEX_cpu),  # Pass as uint8 for comparison with occupancy_grid_gpu
+        voxel_occ_count_gpu, voxel_free_count_gpu, voxel_label_out_gpu,
+        np.int32(FREE_LABEL_placeholder_cpu),  # For initializing voxel_label_out_gpu
+        EPS_CONST_val, DISTANCE_CONST_val
+    )
+    cuda.synchronize()
+
+    # Copy results back to CPU
+    voxel_occ_count_cpu = voxel_occ_count_gpu.copy_to_host()
+    voxel_free_count_cpu = voxel_free_count_gpu.copy_to_host()
+    voxel_label_from_gpu_cpu = voxel_label_out_gpu.copy_to_host()  # This is int32
+
+    # Final state assignment (on CPU)
+    final_voxel_states = np.full(tuple(spatial_shape_cpu_list), STATE_UNOBSERVED, dtype=np.uint8)
+    final_voxel_states[voxel_free_count_cpu > 0] = STATE_FREE
+    final_voxel_states[voxel_occ_count_cpu > 0] = STATE_OCCUPIED
+
+    # Create final semantic labels grid
+    final_semantic_labels = np.full(tuple(spatial_shape_cpu_list), FREE_LEARNING_INDEX_cpu, dtype=np.uint8)
+    # Populate labels for occupied voxels
+    occupied_mask = (final_voxel_states == STATE_OCCUPIED)
+    # voxel_label_from_gpu_cpu contains actual semantic labels for occupied cells,
+    # and FREE_LABEL_placeholder_cpu for others.
+    final_semantic_labels[occupied_mask] = voxel_label_from_gpu_cpu[occupied_mask].astype(np.uint8)
+
+    print("GPU visibility calculation finished.")
+    return final_voxel_states, final_semantic_labels
 
 
 def visualize_occupancy_o3d(voxel_state, voxel_label, pc_range, voxel_size,
@@ -2193,8 +2370,51 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                 points = scene_semantic_points[:, :3]
                 print(points.shape)
 
-                if isinstance(voxel_size, (int, float)):
+                print("Creating Lidar visibility masks using GPU...")
+                # --- Time the GPU execution ---
+                print("\nTiming GPU Lidar visibility calculation...")
+                start_time_gpu = time.perf_counter()
+
+                # Call the GPU host function
+                voxel_state, voxel_label = calculate_lidar_visibility_gpu_host(
+                    points_cpu=points,  # Your (N,3) hits
+                    points_origin_cpu=points_origin,  # Your (N,3) original sensor origins
+                    points_label_cpu=points_label,  # Your (N,) semantic labels (ensure int32)
+                    pc_range_cpu_list=pc_range,  # Your [xmin,ymin,zmin,xmax,ymax,zmax] list
+                    voxel_size_cpu_scalar=voxel_size,  # Your scalar voxel_size from config
+                    spatial_shape_cpu_list=occ_size,  # Your [Dx,Dy,Dz] list from config
+                    occupancy_grid_cpu=occupancy_grid,  # Your pre-computed (Dx,Dy,Dz) aggregated occupancy (uint8)
+                    FREE_LEARNING_INDEX_cpu=FREE_LEARNING_INDEX,  # Your semantic index for free space
+                    FREE_LABEL_placeholder_cpu=-1  # The internal placeholder for initializing labels on GPU
+                )
+
+                end_time_gpu = time.perf_counter()
+                print(f"GPU Lidar visibility calculation took: {end_time_gpu - start_time_gpu:.4f} seconds")
+
+                print(f"GPU Voxel state shape: {voxel_state.shape}")
+                print(f"GPU Voxel label shape: {voxel_label.shape}")
+                print("Finished Lidar visibility masks (GPU).")
+
+                voxel_size_for_viz = np.array([voxel_size] * 3)
+                visualize_occupancy_o3d(
+                    voxel_state,
+                    voxel_label,  # This is now your final semantic grid
+                    pc_range=pc_range,
+                    voxel_size=voxel_size_for_viz,
+                    class_color_map=CLASS_COLOR_MAP,  # Make sure this is globally defined
+                    default_color=DEFAULT_COLOR,  # Make sure this is globally defined
+                    show_semantics=True,
+                    show_free=True,
+                    show_unobserved=False,
+                    point_size=5.0
+                )
+
+                """if isinstance(voxel_size, (int, float)):
                     voxel_size_masks = [voxel_size, voxel_size, voxel_size]
+
+                # --- Time the CPU execution ---
+                print("\nTiming CPU Lidar visibility calculation...")
+                start_time_cpu = time.perf_counter()
 
                 voxel_state, voxel_label = calculate_lidar_visibility(
                     points=scene_semantic_points[:, :3],  # (N,3) hits in ego–i
@@ -2206,6 +2426,9 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                     occupancy_grid=occupancy_grid,
                     FREE_LEARNING_INDEX=FREE_LEARNING_INDEX,
                 )
+
+                end_time_cpu = time.perf_counter()
+                print(f"CPU Lidar visibility calculation took: {end_time_cpu - start_time_cpu:.4f} seconds")
 
                 print(voxel_state.shape)
                 print(voxel_label.shape)
@@ -2224,7 +2447,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                     show_free=True,
                     show_unobserved=False,
                     point_size=5.0
-                )
+                )"""
 
 
 
