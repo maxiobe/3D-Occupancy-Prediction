@@ -34,10 +34,10 @@ if __name__ == '__main__':
         print()
         i += 1
 
-    #my_scene = truckscenes.scene[1]
-    #print(my_scene)
-    #my_scene_token = my_scene['token']
-    #print(my_scene_token)
+    my_scene = truckscenes.scene[65]
+    my_scene_token = my_scene['token']
+    truckscenes.render_scene(my_scene_token)
+
     i = 0
     for scene in truckscenes.scene:
         print(f"Rendering scene {i}...")
