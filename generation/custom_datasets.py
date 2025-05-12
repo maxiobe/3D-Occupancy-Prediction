@@ -80,7 +80,7 @@ class InMemoryDataset:
             return empty_frame, timestamp_array
 
         # Transpose to (N, Features) format
-        frame_n_feat = original_frame_feat_n.T
+        frame_n_feat = original_frame_feat_n
 
         # Extract XYZ and handle empty/insufficient feature cases
         if frame_n_feat.shape[0] == 0:  # Handle empty cloud after transpose
