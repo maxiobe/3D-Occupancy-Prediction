@@ -288,6 +288,10 @@ def main(nusc, val_list, indice, nuscenesyaml, args, config):
             # Combine points with semantic labels
             pc_with_semantic = np.concatenate([pc0[:, :3], points_label], axis=1) # Combines point coordinates with semantic labels to form a 4D array: (x, y, z, semantic_label)
 
+        #print(gt_bbox_3d.shape)
+        #print(gt_bbox_3d)
+        #print(pc0.shape)
+        #print(pc0)
         ############################# cut out movable object points and masks ##########################
         points_in_boxes = points_in_boxes_cpu(torch.from_numpy(pc0[:, :3][np.newaxis, :, :]),
                                               torch.from_numpy(gt_bbox_3d[np.newaxis, :])) # use function to identify which points belong to which bounding box
@@ -330,10 +334,11 @@ def main(nusc, val_list, indice, nuscenesyaml, args, config):
         ############################# get static scene segment ##########################
         # Combine background mask and the self-filter mask using a logical AND
         # Ensures that the final mask excludes both moving objects and the vehicle itself
-        points_mask = points_mask & oneself_mask
+        points_mask = points_mask #& oneself_mask
+        print(pc0.shape)
         # Extract static points
         pc = pc0[points_mask] # uses final mask to filter the static points from the original point cloud
-
+        print(pc.shape)
         ################## coordinate conversion to the same (first) LiDAR coordinate  ##################
         # Get current frame's pose and calibration data
         lidar_ego_pose = nusc.get('ego_pose', lidar_data['ego_pose_token'])

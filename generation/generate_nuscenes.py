@@ -197,6 +197,16 @@ def get_pointwise_fused_pointcloud(nusc: NuScenes, sample: Dict[str, Any], allow
         # Load pointcloud
         pc = LidarPointCloud.from_file(osp.join(nusc.dataroot, sd['filename']))
 
+        print(pc.points.shape)
+        print(pc.points)
+
+        pc1 = np.fromfile(os.path.join(nusc.dataroot, sd['filename']),
+                    dtype=np.float32,
+                    count=-1).reshape(-1, 5)  # Keeps only first four columns (x, y, z, intensity)
+
+        print(pc1.shape)
+        print(pc1)
+
         # Get ego pose for the first and last point of the point cloud
         t_min = np.min(pc.timestamps)
         t_max = np.max(pc.timestamps)
@@ -267,6 +277,14 @@ def get_rigid_fused_pointcloud(nusc: NuScenes, sample: Dict[str, Any], allowed_s
     # Get reference ego pose (timestamp of the sample/annotations)
     # ref_ego_pose = nusc.getclosest('ego_pose', sample['timestamp'])
     ref_ego_pose = get_closest_record_optimized(nusc, 'ego_pose', sample['timestamp'])
+    sample_data_token = sample['data']['LIDAR_TOP']
+    ego_pose_token = nusc.get('sample_data', sample_data_token)['ego_pose_token']
+
+    # Retrieve the ego pose record
+    ref_ego_pose = nusc.get('ego_pose', ego_pose_token)
+
+    print("Reference ego pose rigid fused pc")
+    print(ref_ego_pose)
 
     # Homogeneous transformation matrix from global to ref ego car frame.
     car_from_global = transform_matrix(ref_ego_pose['translation'],
@@ -286,6 +304,13 @@ def get_rigid_fused_pointcloud(nusc: NuScenes, sample: Dict[str, Any], allowed_s
 
         # Load pointcloud
         pc = LidarPointCloud.from_file(osp.join(nusc.dataroot, sd['filename']))
+        print(pc.points)
+
+        pc0 = np.fromfile(os.path.join(nusc.dataroot, sd['filename']),
+                          dtype=np.float32,
+                          count=-1).reshape(-1, 5)[..., :4]  # Keeps only first four columns (x, y, z, intensity)
+
+        print(pc0)
 
         # Get ego pose (timestamp of the sample data/point cloud)
         # sensor_ego_pose = nusc.getclosest('ego_pose', sd['timestamp'])
@@ -310,8 +335,8 @@ def get_rigid_fused_pointcloud(nusc: NuScenes, sample: Dict[str, Any], allowed_s
 
         # Merge with key pc.
         fused_point_cloud.points = np.hstack((fused_point_cloud.points, pc.points))
-        if pc.timestamps is not None:
-            fused_point_cloud.timestamps = np.hstack((fused_point_cloud.timestamps, pc.timestamps))
+        #if pc.timestamps is not None:
+         #   fused_point_cloud.timestamps = np.hstack((fused_point_cloud.timestamps, pc.timestamps))
 
     return fused_point_cloud
 
@@ -333,6 +358,16 @@ def get_boxes(nusc: NuScenes, sample: Dict[str, Any]) -> List[Box]:
     # Get reference ego pose (timestamp of the sample/annotations)
     # ref_ego_pose = nusc.getclosest('ego_pose', sample['timestamp'])
     ref_ego_pose = get_closest_record_optimized(nusc, 'ego_pose', sample['timestamp'])
+    print("Reference ego pose getclosest version")
+    print(ref_ego_pose)
+
+    sample_data_token = sample['data']['LIDAR_TOP']
+    ego_pose_token = nusc.get('sample_data', sample_data_token)['ego_pose_token']
+
+    # Retrieve the ego pose record
+    ref_ego_pose = nusc.get('ego_pose', ego_pose_token)
+    print("Reference ego pose old version")
+    print(ref_ego_pose)
 
     # Transform boxes to ego frame
     for box in boxes:
@@ -813,6 +848,16 @@ def main(nusc, val_list, indice, nuscenesyaml, args, config):
         # gt_bbox_3d[:, 3:6] = gt_bbox_3d[:, 3:6] * 1.05 # Experiment
         gt_bbox_3d[:, 3:6] = gt_bbox_3d[:, 3:6] * 1.1  # Slightly expand the bbox to wrap all object points
 
+        #print(gt_bbox_3d.shape)
+        #print(gt_bbox_3d)
+        #print(sensor_fused_pc.points.shape)
+        #print(sensor_fused_pc.points)
+
+        print("Example point:", sensor_fused_pc.points[:, 0])  # Ego frame
+        print("Example box center:", gt_bbox_3d[0, :3])  # Should be close in Z
+
+        visualize_pointcloud_bbox(sensor_fused_pc.points.T[:, :3], boxes=get_boxes(nusc, my_sample))
+
         ############################# cut out movable object points and masks ##########################
         points_in_boxes = points_in_boxes_cpu(torch.from_numpy(sensor_fused_pc.points.T[:, :3][np.newaxis, :, :]),
                                               torch.from_numpy(gt_bbox_3d[np.newaxis,
@@ -872,7 +917,8 @@ def main(nusc, val_list, indice, nuscenesyaml, args, config):
         inside_ego_mask = inside_x & inside_y & inside_z
         ego_filter_mask = ~inside_ego_mask
 
-        points_mask = static_mask & ego_filter_mask
+        #points_mask = static_mask & ego_filter_mask
+        points_mask = static_mask
 
         pc_ego = sensor_fused_pc.points.T[points_mask]
         print(f"Number of static points extracted: {pc_ego.shape}")
