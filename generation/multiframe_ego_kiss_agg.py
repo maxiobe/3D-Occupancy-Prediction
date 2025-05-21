@@ -1640,6 +1640,10 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     self_range = config[
         'self_range']  # Parameter in config file that specifies a range threshold for the vehicle's own points
     x_min_self, y_min_self, z_min_self, x_max_self, y_max_self, z_max_self = self_range
+
+    intensity_threshold = config['intensity_threshold']
+    distance_intensity_threshold = config['distance_intensity_threshold']
+
     object_icp_voxel_size = config.get("object_icp_voxel_size", 0.1)
 
     # sensors = ['LIDAR_LEFT', 'LIDAR_RIGHT']
@@ -1651,6 +1655,9 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     # Retrieves a specific scene from the truckScenes dataset
     my_scene = trucksc.scene[indice]  # scene is selected by indice parameter
     scene_name = my_scene['name']  ### Extract scene name for saving
+    print(f"Processing scene: {scene_name}")
+    scene_description = my_scene['description']
+    print(f"Scene description: {scene_description}")
     # load the first sample from a scene to start
     first_sample_token = my_scene[
         'first_sample_token']  # access the first sample token: contains token of first frame of the scene
@@ -1720,11 +1727,11 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         object_category = [truckscenes.get('sample_annotation', box_token)['category_name'] for box_token in
                            boxes_token]  # retrieves category name for each bounding box
 
-        """visualize_pointcloud_bbox(sensor_fused_pc.points.T,
+        visualize_pointcloud_bbox(sensor_fused_pc.points.T,
                                   boxes=boxes,
                                   title=f"Fused filtered static sensor PC + BBoxes + Ego BBox - Frame {i}",
                                   self_vehicle_range=self_range,
-                                  vis_self_vehicle=True)"""
+                                  vis_self_vehicle=True)
 
         ############################# get object categories ##########################
         converted_object_category = []  # Initialize empty list
@@ -1858,6 +1865,44 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
         pc_ego = pc_ego_unfiltered.copy()
         pc_with_semantic_ego = pc_with_semantic_ego_unfiltered.copy()
+
+        # find the part that starts with "weather."
+        weather_tag = next(tag for tag in scene_description.split(';') if tag.startswith('weather.'))
+        # split on the dot and take the second piece
+        weather = weather_tag.split('.', 1)[1]
+
+        if weather == 'snow' or weather == 'rain':
+            print(f"Lidar intensity filtering for bad weather: {weather} with intensity {intensity_threshold} and distance threshold {distance_intensity_threshold} metres")
+            print(f'Shape of pc_ego before weather filtering: {pc_ego.shape}')
+
+            distances_to_ego = np.linalg.norm(pc_ego[:, :3], axis=1)
+
+            pc_lidar_intensities = pc_ego[:, 3]
+
+            filter_keep_mask = (distances_to_ego > distance_intensity_threshold) | \
+                               ((distances_to_ego <= distance_intensity_threshold) & (
+                                           pc_lidar_intensities > intensity_threshold))
+
+            # intensity_mask = pc_lidar_intensities > intensity_threshold
+            # pc_ego = pc_ego[intensity_mask]
+            # pc_ego_unfiltered_sensors = pc_ego_unfiltered_sensors[intensity_mask]
+            # pc_with_semantic_ego = pc_with_semantic_ego[intensity_mask]
+            # pc_with_semantic_ego_unfiltered_sensors = pc_with_semantic_ego_unfiltered_sensors[intensity_mask]
+
+            pc_ego = pc_ego[filter_keep_mask]
+            pc_ego_unfiltered_sensors = pc_ego_unfiltered_sensors[filter_keep_mask]
+            pc_with_semantic_ego = pc_with_semantic_ego[filter_keep_mask]
+            pc_with_semantic_ego_unfiltered_sensors = pc_with_semantic_ego_unfiltered_sensors[filter_keep_mask]
+
+            print(f'Shape of pc_ego after weateher filtering: {pc_ego.shape}')
+        else:
+            print(f"No lidar intensity filtering for good weather: {weather}")
+
+        visualize_pointcloud_bbox(pc_ego,
+                                  boxes=boxes,
+                                  title=f"Fused filtered static sensor PC + BBoxes + Ego BBox - Frame {i}",
+                                  self_vehicle_range=self_range,
+                                  vis_self_vehicle=True)
 
         # Optional: Apply filtering to static points in ego frame
         if args.filter_location in ['ego_static', 'all'] and args.filter_mode != 'none':

@@ -37,6 +37,9 @@ sensors: ['LIDAR_LEFT', 'LIDAR_RIGHT', 'LIDAR_TOP_FRONT', 'LIDAR_TOP_LEFT', 'LID
 cameras: ['CAMERA_LEFT_FRONT', 'CAMERA_RIGHT_FRONT', 'CAMERA_LEFT_BACK', 'CAMERA_RIGHT_BACK']
 max_time_diff: 80000
 
-
 # Parameters for camera visibility
 'camera_ray_depth_max': 100
+
+# Parameters for lidar intensity filtering
+'intensity_threshold': 0
+'distance_intensity_threshold': 30

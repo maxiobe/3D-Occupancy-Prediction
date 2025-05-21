@@ -14,10 +14,15 @@ def main(trucksc, args):
 
     first_sample_token = my_scene['first_sample_token']
     my_sample = trucksc.get('sample', first_sample_token)
-    sample_data_token = my_sample['data']['LIDAR_LEFT']
+    # sample_data_token = my_sample['data']['LIDAR_LEFT']
+    # sample_data_token = my_sample['data']['LIDAR_RIGHT']
+    # sample_data_token = my_sample['data']['LIDAR_TOP_LEFT']
+    # sample_data_token = my_sample['data']['LIDAR_TOP_RIGHT']
+    sample_data_token = my_sample['data']['LIDAR_TOP_FRONT']
+    # sample_data_token = my_sample['data']['LIDAR_REAR']
     sample_data = trucksc.get('sample_data', sample_data_token)
 
-    #trucksc.render_scene(my_scene['token'])
+    # trucksc.render_scene(my_scene['token'])
 
     filename = sample_data['filename']
     load_path = os.path.join(trucksc.dataroot, filename)
@@ -108,7 +113,7 @@ def main(trucksc, args):
 
 if __name__ == "__main__":
     parse = ArgumentParser()
-    parse.add_argument('--scene_id', type=int, default=0)
+    parse.add_argument('--scene_id', type=int, default=74)
     parse.add_argument('--version', type=str, default='v1.0-trainval')
     parse.add_argument('--data_root', type=str, default='/home/max/ssd/Masterarbeit/TruckScenes/trainval/v1.0-trainval')
 
