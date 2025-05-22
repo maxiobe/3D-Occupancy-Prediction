@@ -1,19 +1,20 @@
-out_dir: results
+adaptive_threshold:
+  fixed_threshold: null
+  initial_threshold: 2.0
+  min_motion_th: 0.1
+
 data:
-  max_range: 150.0
-  min_range: 0.0
   deskew: false
+  max_range: 100.0
+  min_range: 0.0
 
 registration:
-  max_num_iterations: 500
   convergence_criterion: 0.0001
+  max_num_iterations: 500
   max_num_threads: 0
 
 mapping:
-  voxel_size: 0.3
+  voxel_size: null
   max_points_per_voxel: 20
 
-adaptive_threshold:
-  # fixed_threshold: 5.0
-  initial_threshold: 2.0
-  min_motion_th: 0.1
+out_dir: results
