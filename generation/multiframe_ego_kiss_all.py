@@ -1793,10 +1793,14 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         for sensor in sensors:
             print(f"  {sensor}: {group[sensor]['timestamp']} | keyframe: {group[sensor]['keyframe']}")
 
+        ref_sensor = sensors[0]
+
         sample_data_dict = {sensor: group[sensor]['token'] for sensor in sensors}
         sample = {
             'timestamp': np.mean([group[s]['timestamp'] for s in sensors]),
-            'data': sample_data_dict
+            'data': sample_data_dict,
+            'sample_data_token': sample_data_dict[ref_sensor],
+            'is_key_frame': group[ref_sensor]['keyframe'],
         }
 
         ########### Load point cloud #############
@@ -1822,12 +1826,11 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         ##########################################
 
         ########### get boxes #####################
-        ref_sensor = sensors[0]
-        ref_sample_data_token = sample['data'][ref_sensor]
-        boxes_global = trucksc.get_boxes(ref_sample_data_token)
+        #ref_sample_data_token = sample['data'][ref_sensor]
+        boxes_global = trucksc.get_boxes(sample['sample_data_token'])
 
         # Convert to ego or sensor frame (optional depending on fusion mode)
-        pose_record = trucksc.getclosest('ego_pose', trucksc.get('sample_data', ref_sample_data_token)['timestamp'])
+        pose_record = trucksc.getclosest('ego_pose', trucksc.get('sample_data', sample['sample_data_token'])['timestamp'])
 
         boxes_ego = transform_boxes_to_ego(
             boxes=boxes_global,
@@ -2039,7 +2042,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                                       title=f"Fused filtered static sensor PC + BBoxes - Frame {i}")
 
         # Get ego pose for this sample
-        ego_pose_i = trucksc.getclosest('ego_pose', my_sample['timestamp'])
+        ego_pose_i = trucksc.getclosest('ego_pose', sample['timestamp'])
 
         # Transformation from ego to global
         global_from_ego_i = transform_matrix(ego_pose_i['translation'], Quaternion(ego_pose_i['rotation']),
@@ -2087,13 +2090,13 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         pc_with_semantic_global_save = semantic_points_in_global_frame.copy()  # Filtered semantic points transformed to global frame (Features+1, N)
 
         ################## record information into a dict  ########################
-        ref_sd = trucksc.get('sample_data', my_sample['data']['LIDAR_LEFT'])
+        ref_sd = trucksc.get('sample_data', sample['sample_data_token'])
 
         frame_dict = {
-            "sample_timestamp": my_sample['timestamp'],
+            "sample_timestamp": sample['timestamp'],
             "scene_name": scene_name,
-            "sample_token": my_sample['token'],
-            "is_key_frame": ref_sd['is_key_frame'],
+            "sample_token": trucksc.get('sample', ref_sd['sample_token'])['token'],
+            "is_key_frame": sample['is_key_frame'],
             "converted_object_category": converted_object_category,
             "gt_bbox_3d": gt_bbox_3d,  # BBox in current frame's ego coords
             "object_tokens": object_tokens,
@@ -2193,7 +2196,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     raw_pc_coordinates = raw_pc_draw[:, :3]
     raw_pc_to_draw.points = o3d.utility.Vector3dVector(raw_pc_coordinates)
     o3d.visualization.draw_geometries([raw_pc_to_draw],
-                                      window_name="Combined static and dynamic point clouds (in ego frame)")
+                                      window_name="Combined static and dynamic point clouds (in ego i frame)")
 
     # Extract timestamps associated with each frame's original ego pose
     try:
