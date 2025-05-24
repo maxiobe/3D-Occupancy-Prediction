@@ -527,7 +527,7 @@ def denoise_pointcloud(pcd: o3d.geometry.PointCloud, filter_mode: str, config: d
         # --- 2. REMOVED internal location_msg = "point cloud" ---
 
         # --- 3. Use the passed location_msg argument here ---
-        print(f"[Filtering ({filter_mode}) at {location_msg}] Reduced from {initial_count} to {final_count} points.")
+        print(f"Filtering {location_msg} with filter mode {filter_mode}. Reduced from {initial_count} to {final_count} points.")
 
     except Exception as e:
         print(f"Error during filtering ({filter_mode}) at {location_msg}: {e}. Returning original.")
@@ -1818,11 +1818,6 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         else:
             print(f"The fused sensor pc at frame {i} has the shape: {sensor_fused_pc.points.shape} with no timestamps.")
 
-        # visualize_pointcloud(sensor_fused_pc.points.T, title=f"Fused sensor PC in ego coordinates - Frame {i}")
-
-        if args.vis and args.vis_position == 'fused_sensors_ego':
-            visualize_pointcloud(sensor_fused_pc.points.T, title=f"Fused sensor PC in ego coordinates - Frame {i}")
-
         ##########################################
 
         ########### get boxes #####################
@@ -1845,11 +1840,65 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         object_category = [truckscenes.get('sample_annotation', box_token)['category_name'] for box_token in
                            boxes_token]  # retrieves category name for each bounding box
 
+        ############################### Visualize if specified in arguments ###########################################
+        # visualize_pointcloud(sensor_fused_pc.points.T, title=f"Fused sensor PC in ego coordinates - Frame {i}")
         """visualize_pointcloud_bbox(sensor_fused_pc.points.T,
-                                  boxes=boxes_ego,
-                                  title=f"Fused filtered static sensor PC + BBoxes + Ego BBox - Frame {i}",
-                                  self_vehicle_range=self_range,
-                                  vis_self_vehicle=True)"""
+                                          boxes=boxes_ego,
+                                          title=f"Fused filtered static sensor PC + BBoxes + Ego BBox - Frame {i}",
+                                          self_vehicle_range=self_range,
+                                          vis_self_vehicle=True)"""
+
+        if args.vis_raw_pc:
+            visualize_pointcloud_bbox(sensor_fused_pc.points.T,
+                                      boxes=boxes_ego,
+                                      title=f"Fused raw sensor PC + BBoxes + Ego BBox - Frame {i}",
+                                      self_vehicle_range=self_range,
+                                      vis_self_vehicle=True)
+
+
+        ############################## Filter raw pc #################################################################
+        if args.filter_raw_pc and args.filter_mode != 'none':
+            # 1) prepare
+            raw_pts = sensor_fused_pc.points.T # (N, 3+…)
+            raw_sids = sensor_ids_points  # (N,)
+            pcd_raw = o3d.geometry.PointCloud()
+            pcd_raw.points = o3d.utility.Vector3dVector(raw_pts[:, :3])
+
+            # 2) filter
+            filtered_raw_pcd, kept_raw_idx = denoise_pointcloud(pcd_raw, args.filter_mode, config,
+                                                                location_msg=f"raw pc at frame {i}")
+            # 3) re‐assemble arrays
+            raw_pts = np.asarray(filtered_raw_pcd.points)
+            raw_sids = raw_sids[kept_raw_idx]
+
+            # 4) if you had extra features beyond XYZ, re‐append them:
+            if sensor_fused_pc.points.shape[0] > 3:
+                raw_pts = np.hstack([raw_pts, sensor_fused_pc.points.T[kept_raw_idx, 3:]])
+
+            # Now overwrite your fused_pc & sensor_ids:
+            sensor_fused_pc.points = raw_pts.T
+            sensor_fused_pc.timestamps = sensor_fused_pc.timestamps[:, kept_raw_idx]
+            sensor_ids_points = raw_sids
+
+        assert sensor_fused_pc.points.shape[1] == sensor_ids_points.shape[0], \
+            f"point count {sensor_fused_pc.points.shape[1]} vs sensor_ids {sensor_ids_points.shape[0]}"
+        ##############################################################################################################
+
+        ############################### Visualize if specified in arguments ###########################################
+        # visualize_pointcloud(sensor_fused_pc.points.T, title=f"Fused sensor PC in ego coordinates - Frame {i}")
+        """visualize_pointcloud_bbox(sensor_fused_pc.points.T,
+                                          boxes=boxes_ego,
+                                          title=f"Fused filtered static sensor PC + BBoxes + Ego BBox - Frame {i}",
+                                          self_vehicle_range=self_range,
+                                          vis_self_vehicle=True)"""
+
+        if args.vis_raw_pc and args.filter_raw_pc:
+            visualize_pointcloud_bbox(sensor_fused_pc.points.T,
+                                      boxes=boxes_ego,
+                                      title=f"Fused filtered raw sensor PC (filter mode {args.filter_mode}) + BBoxes + Ego BBox - Frame {i}",
+                                      self_vehicle_range=self_range,
+                                      vis_self_vehicle=True)
+
 
         ############################# get object categories ##########################
         converted_object_category = []  # Initialize empty list
@@ -1976,70 +2025,98 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         print(
             f"Number of semantic static points extracted: {pc_with_semantic_ego_unfiltered.shape} with sensor_ids {pc_with_semantic_ego_unfiltered_sensors.shape}")
 
+        ############################### Visualize if specified in arguments ###########################################
         """visualize_pointcloud_bbox(pc_with_semantic_ego_unfiltered,
-                                  boxes=boxes_ego,
-                                  title=f"Fused filtered static sensor PC + BBoxes + Ego BBox - Frame {i}",
-                                  self_vehicle_range=self_range,
-                                  vis_self_vehicle=True)"""
+                                          boxes=boxes_ego,
+                                          title=f"Fused filtered static sensor PC + BBoxes + Ego BBox - Frame {i}",
+                                          self_vehicle_range=self_range,
+                                          vis_self_vehicle=True)"""
+
+        if args.vis_static_pc:
+            visualize_pointcloud_bbox(pc_with_semantic_ego_unfiltered,
+                                      boxes=boxes_ego,
+                                      title=f"Fused static sensor PC + BBoxes + Ego BBox - Frame {i}",
+                                      self_vehicle_range=self_range,
+                                      vis_self_vehicle=True)
+        ############################################################################################################
 
         pc_ego = pc_ego_unfiltered.copy()
         pc_with_semantic_ego = pc_with_semantic_ego_unfiltered.copy()
 
-        # find the part that starts with "weather."
-        weather_tag = next(tag for tag in scene_description.split(';') if tag.startswith('weather.'))
-        # split on the dot and take the second piece
-        weather = weather_tag.split('.', 1)[1]
+        ########################################## Lidar intensity filtering #######################################
+        if args.filter_lidar_intensity:
+            # find the part that starts with "weather."
+            weather_tag = next(tag for tag in scene_description.split(';') if tag.startswith('weather.'))
+            # split on the dot and take the second piece
+            weather = weather_tag.split('.', 1)[1]
 
-        if weather == 'snow' or weather == 'rain':
-            print(
-                f"Lidar intensity filtering for bad weather: {weather} with intensity {intensity_threshold} and distance threshold {distance_intensity_threshold} metres")
-            print(f'Shape of pc_ego before weather filtering: {pc_ego.shape}')
+            if weather == 'snow' or weather == 'rain':
+                print(
+                    f"Lidar intensity filtering for bad weather: {weather} with intensity {intensity_threshold} and distance threshold {distance_intensity_threshold} metres")
+                print(f'Shape of pc_ego before weather filtering: {pc_ego.shape}')
 
-            distances_to_ego = np.linalg.norm(pc_ego[:, :3], axis=1)
+                distances_to_ego = np.linalg.norm(pc_ego[:, :3], axis=1)
 
-            pc_lidar_intensities = pc_ego[:, 3]
+                pc_lidar_intensities = pc_ego[:, 3]
 
-            filter_keep_mask = (distances_to_ego > distance_intensity_threshold) | \
-                               ((distances_to_ego <= distance_intensity_threshold) & (
-                                       pc_lidar_intensities > intensity_threshold))
+                filter_keep_mask = (distances_to_ego > distance_intensity_threshold) | \
+                                   ((distances_to_ego <= distance_intensity_threshold) & (
+                                           pc_lidar_intensities > intensity_threshold))
 
-            # intensity_mask = pc_lidar_intensities > intensity_threshold
-            # pc_ego = pc_ego[intensity_mask]
-            # pc_ego_unfiltered_sensors = pc_ego_unfiltered_sensors[intensity_mask]
-            # pc_with_semantic_ego = pc_with_semantic_ego[intensity_mask]
-            # pc_with_semantic_ego_unfiltered_sensors = pc_with_semantic_ego_unfiltered_sensors[intensity_mask]
+                # intensity_mask = pc_lidar_intensities > intensity_threshold
+                # pc_ego = pc_ego[intensity_mask]
+                # pc_ego_unfiltered_sensors = pc_ego_unfiltered_sensors[intensity_mask]
+                # pc_with_semantic_ego = pc_with_semantic_ego[intensity_mask]
+                # pc_with_semantic_ego_unfiltered_sensors = pc_with_semantic_ego_unfiltered_sensors[intensity_mask]
 
-            pc_ego = pc_ego[filter_keep_mask]
-            pc_ego_unfiltered_sensors = pc_ego_unfiltered_sensors[filter_keep_mask]
-            pc_with_semantic_ego = pc_with_semantic_ego[filter_keep_mask]
-            pc_with_semantic_ego_unfiltered_sensors = pc_with_semantic_ego_unfiltered_sensors[filter_keep_mask]
+                pc_ego = pc_ego[filter_keep_mask]
+                pc_ego_unfiltered_sensors = pc_ego_unfiltered_sensors[filter_keep_mask]
+                pc_with_semantic_ego = pc_with_semantic_ego[filter_keep_mask]
+                pc_with_semantic_ego_unfiltered_sensors = pc_with_semantic_ego_unfiltered_sensors[filter_keep_mask]
 
-            print(f'Shape of pc_ego after weateher filtering: {pc_ego.shape}')
+                print(f'Shape of pc_ego after weather filtering: {pc_ego.shape}')
+
+                ################################ Visualize if specified in arguments ##################################
+                if args.vis_lidar_intensity_filtered:
+                    visualize_pointcloud_bbox(pc_ego,
+                                                      boxes=boxes_ego,
+                                                      title=f"Fused filtered static sensor PC + BBoxes + Ego BBox - Frame {i}",
+                                                      self_vehicle_range=self_range,
+                                                      vis_self_vehicle=True)
+                #######################################################################################################
+            else:
+                print(f"No lidar intensity filtering for good weather: {weather}")
         else:
-            print(f"No lidar intensity filtering for good weather: {weather}")
+            print(f"No lidar intensity filtering according to arguments")
 
-        """visualize_pointcloud_bbox(pc_ego,
-                                  boxes=boxes_ego,
-                                  title=f"Fused filtered static sensor PC + BBoxes + Ego BBox - Frame {i}",
-                                  self_vehicle_range=self_range,
-                                  vis_self_vehicle=True)"""
+        ############################# Apply filtering to static points in ego frame #################################
+        if args.filter_static_pc and args.filter_mode != 'none':
+            pcd_static = o3d.geometry.PointCloud()
+            pcd_static.points = o3d.utility.Vector3dVector(pc_ego[:, :3])
+            filtered_pcd_static, kept_indices = denoise_pointcloud(
+                pcd_static, args.filter_mode, config, location_msg=f"static ego points at frame {i}"
+            )
+            pc_ego = np.asarray(filtered_pcd_static.points)
+            pc_ego_unfiltered_sensors = pc_ego_unfiltered_sensors[kept_indices]
+            pc_with_semantic_ego = pc_with_semantic_ego[kept_indices]  # ✅ Only filter here
+            pc_with_semantic_ego_unfiltered_sensors = pc_with_semantic_ego_unfiltered_sensors[kept_indices]
 
-        # Optional: Apply filtering to static points in ego frame
-        if args.filter_location in ['ego_static', 'all'] and args.filter_mode != 'none':
-            print(f"Filtering static ego points at frame {i}...")
+        assert pc_ego.shape[0] == pc_ego_unfiltered_sensors.shape[0], (
+            f"static points ({pc_ego.shape[0]}) != sensor_ids ({pc_ego_unfiltered_sensors.shape[0]})"
+        )
+        assert pc_with_semantic_ego.shape[0] == pc_with_semantic_ego_unfiltered_sensors.shape[0], (
+            f"semantic points ({pc_with_semantic_ego.shape[0]}) != semantic_sensor_ids "
+            f"({pc_with_semantic_ego_unfiltered_sensors.shape[0]})"
+        )
 
-            if pc_ego.shape[0] > 0:
-                pcd_static = o3d.geometry.PointCloud()
-                pcd_static.points = o3d.utility.Vector3dVector(pc_ego[:, :3])
-                filtered_pcd_static, kept_indices = denoise_pointcloud(
-                    pcd_static, args.filter_mode, config, location_msg="static ego points"
-                )
-                pc_ego = np.asarray(filtered_pcd_static.points)
-                pc_with_semantic_ego = pc_with_semantic_ego[kept_indices]  # ✅ Only filter here
-
-        if args.vis and args.vis_position == 'fused_sensors_ego_boxes_static':
-            visualize_pointcloud_bbox(pc_ego, boxes=boxes_ego,
-                                      title=f"Fused filtered static sensor PC + BBoxes - Frame {i}")
+        ############################ Visualization #############################################################
+        if args.vis_static_pc and args.filter_static_pc:
+            visualize_pointcloud_bbox(pc_with_semantic_ego_unfiltered,
+                                      boxes=boxes_ego,
+                                      title=f"Fused filtered static sensor PC (filter mode {args.filter_mode}) + BBoxes + Ego BBox - Frame {i}",
+                                      self_vehicle_range=self_range,
+                                      vis_self_vehicle=True)
+        #######################################################################################################
 
         # Get ego pose for this sample
         ego_pose_i = trucksc.getclosest('ego_pose', sample['timestamp'])
@@ -2076,7 +2153,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         print(
             f"Frame {i}: Transformed semantic static points to global. Shape: {semantic_points_in_global_frame.shape}")
 
-        if args.vis and args.vis_position == 'fused_sensors_global_static':
+        if args.vis_static_pc_global:
             visualize_pointcloud(points_in_ref_frame, title=f"Fused sensor PC in world coordinates - Frame {i}")
 
         # Assign the calculated variables to the desired keys
@@ -2154,10 +2231,14 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
     pc_ego_combined_draw = np.concatenate(unrefined_pc_ego_list, axis=0)
     print(f"Pc ego i combined shape: {pc_ego_combined_draw.shape}")
-    pc_ego_to_draw = o3d.geometry.PointCloud()
-    pc_coordinates = pc_ego_combined_draw[:, :3]
-    pc_ego_to_draw.points = o3d.utility.Vector3dVector(pc_coordinates)
-    o3d.visualization.draw_geometries([pc_ego_to_draw], window_name="Combined static point clouds (in ego i frame)")
+
+    ######################## Visualization #################################################
+    if args.vis_aggregated_static_ego_i_pc:
+        pc_ego_to_draw = o3d.geometry.PointCloud()
+        pc_coordinates = pc_ego_combined_draw[:, :3]
+        pc_ego_to_draw.points = o3d.utility.Vector3dVector(pc_coordinates)
+        o3d.visualization.draw_geometries([pc_ego_to_draw], window_name="Combined static point clouds (in ego i frame)")
+    ########################################################################################
 
     unrefined_pc_ego_ref_list = [frame_dict['lidar_pc_ego_ref'] for frame_dict in dict_list]
     print(f"Extracted {len(unrefined_pc_ego_ref_list)} static point clouds (in ego ref frame).")
@@ -2169,11 +2250,15 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
     pc_ego_ref_combined_draw = np.concatenate(unrefined_pc_ego_ref_list, axis=0)
     print(f"Pc ego ref combined shape: {pc_ego_ref_combined_draw.shape}")
-    pc_ego_ref_to_draw = o3d.geometry.PointCloud()
-    pc_ego_ref_coordinates = pc_ego_ref_combined_draw[:, :3]
-    pc_ego_ref_to_draw.points = o3d.utility.Vector3dVector(pc_ego_ref_coordinates)
-    o3d.visualization.draw_geometries([pc_ego_ref_to_draw],
-                                      window_name="Combined static point clouds (in ego ref frame)")
+
+    ###################### Visualization ##################################################
+    if args.vis_aggregated_static_ego_ref_pc:
+        pc_ego_ref_to_draw = o3d.geometry.PointCloud()
+        pc_ego_ref_coordinates = pc_ego_ref_combined_draw[:, :3]
+        pc_ego_ref_to_draw.points = o3d.utility.Vector3dVector(pc_ego_ref_coordinates)
+        o3d.visualization.draw_geometries([pc_ego_ref_to_draw],
+                                          window_name="Combined static point clouds (in ego ref frame)")
+    #######################################################################################
 
     unrefined_pc_global_list = [frame_dict['lidar_pc_global'] for frame_dict in dict_list]
     print(f"Extracted {len(unrefined_pc_global_list)} static point clouds (in world frame).")
@@ -2182,22 +2267,31 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
     pc_global_combined_draw = np.concatenate(unrefined_pc_global_list, axis=0)
     print(f"Pc global shape: {pc_global_combined_draw.shape}")
-    pc_global_to_draw = o3d.geometry.PointCloud()
-    pc_global_coordinates = pc_global_combined_draw[:, :3]
-    pc_global_to_draw.points = o3d.utility.Vector3dVector(pc_global_coordinates)
-    o3d.visualization.draw_geometries([pc_global_to_draw],
-                                      window_name="Combined static point clouds (in ego ref frame)")
+
+    ####################### Visualization ################################################
+    if args.vis_aggregated_static_global_pc:
+        pc_global_to_draw = o3d.geometry.PointCloud()
+        pc_global_coordinates = pc_global_combined_draw[:, :3]
+        pc_global_to_draw.points = o3d.utility.Vector3dVector(pc_global_coordinates)
+        o3d.visualization.draw_geometries([pc_global_to_draw],
+                                          window_name="Combined static point clouds (in global frame)")
+    ######################################################################################
 
     raw_pc_list = [frame_dict['raw_lidar_ego'] for frame_dict in dict_list]
     print(f"Extracted {len(raw_pc_list)} static and dynamic point clouds (in ego i frame).")
     raw_pc_draw = np.concatenate(raw_pc_list, axis=0)
     print(f"Raw Pc with static and dynamic points shape: {raw_pc_draw.shape}")
-    raw_pc_to_draw = o3d.geometry.PointCloud()
-    raw_pc_coordinates = raw_pc_draw[:, :3]
-    raw_pc_to_draw.points = o3d.utility.Vector3dVector(raw_pc_coordinates)
-    o3d.visualization.draw_geometries([raw_pc_to_draw],
-                                      window_name="Combined static and dynamic point clouds (in ego i frame)")
 
+    ########################## Visualization #############################################
+    if args.vis_aggregated_raw_pc_ego_i:
+        raw_pc_to_draw = o3d.geometry.PointCloud()
+        raw_pc_coordinates = raw_pc_draw[:, :3]
+        raw_pc_to_draw.points = o3d.utility.Vector3dVector(raw_pc_coordinates)
+        o3d.visualization.draw_geometries([raw_pc_to_draw],
+                                          window_name="Combined static and dynamic point clouds (in ego i frame)")
+
+    ######################################################################################
+    ##################### Prepare lidar timestamps for Kiss-ICP ##########################
     # Extract timestamps associated with each frame's original ego pose
     try:
         # Adjust key if needed based on your ego_pose dictionary structure
@@ -2209,9 +2303,8 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
     print(f"Lidar timestamps: {lidar_timestamps}")
 
-    print("Finished preparing initial lists of points in reference ego frame.")
-
     poses_kiss_icp = None
+    ###############################################################################################
     ################# Refinement using KISS-ICP ###################################################
     if args.icp_refinement and len(dict_list) > 1:
         print(f"--- Performing KISS-ICP refinement on static global point clouds for scene {scene_name} ---")
@@ -2335,66 +2428,69 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
     assert lidar_pc_final_global.shape[0] == lidar_pc_final_global_sensor_ids.shape[0]
 
-    # --- Visualization Part ---
+    ########################################### Visualization #########################################################
+    if args.vis_static_frame_comparison_kiss_refined:
+        # Define frames to visualize
+        frame_indices_to_viz = [1, 25]  # Frame 1 (index 0), Frame 25 (index 24)
+        colors = [
+            [1.0, 0.0, 0.0],  # Red for frame 1
+            [0.0, 0.0, 1.0]  # Blue for frame 25
+        ]
 
-    # Define frames to visualize
-    frame_indices_to_viz = [1, 25]  # Frame 1 (index 0), Frame 25 (index 24)
-    colors = [
-        [1.0, 0.0, 0.0],  # Red for frame 1
-        [0.0, 0.0, 1.0]  # Blue for frame 25
-    ]
-
-    # Check if the list is long enough
-    if len(refined_lidar_pc_list) <= max(frame_indices_to_viz):
-        print(
-            f"Error: refined_lidar_pc_list only has {len(refined_lidar_pc_list)} elements. Cannot access frame {max(frame_indices_to_viz) + 1}.")
-        # Handle error appropriately, maybe exit or skip visualization
-        sys.exit(1)  # Or 'pass' if you want to continue without this visualization
-
-    point_clouds_to_visualize = []
-
-    for i, frame_idx in enumerate(frame_indices_to_viz):
-        # Get the point cloud for the specific frame
-        pc_np = refined_lidar_pc_list[frame_idx]
-
-        # Ensure it's not empty and has the right dimensions
-        if pc_np is None or pc_np.shape[0] == 0:
-            print(f"Warning: Point cloud for frame {frame_idx + 1} (index {frame_idx}) is empty. Skipping.")
-            continue
-        if pc_np.ndim != 2 or pc_np.shape[1] < 3:
+        # Check if the list is long enough
+        if len(refined_lidar_pc_list) <= max(frame_indices_to_viz):
             print(
-                f"Warning: Point cloud for frame {frame_idx + 1} (index {frame_idx}) has unexpected shape {pc_np.shape}. Needs (N, >=3). Skipping.")
-            continue
+                f"Error: refined_lidar_pc_list only has {len(refined_lidar_pc_list)} elements. Cannot access frame {max(frame_indices_to_viz) + 1}.")
+            # Handle error appropriately, maybe exit or skip visualization
+            sys.exit(1)  # Or 'pass' if you want to continue without this visualization
 
-        # Extract XYZ coordinates (assuming they are the first 3 columns)
-        xyz = pc_np[:, :3]
+        point_clouds_to_visualize = []
 
-        # Create Open3D point cloud object
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(xyz)
+        for i, frame_idx in enumerate(frame_indices_to_viz):
+            # Get the point cloud for the specific frame
+            pc_np = refined_lidar_pc_list[frame_idx]
 
-        # Assign color
-        pcd.paint_uniform_color(colors[i])
+            # Ensure it's not empty and has the right dimensions
+            if pc_np is None or pc_np.shape[0] == 0:
+                print(f"Warning: Point cloud for frame {frame_idx + 1} (index {frame_idx}) is empty. Skipping.")
+                continue
+            if pc_np.ndim != 2 or pc_np.shape[1] < 3:
+                print(
+                    f"Warning: Point cloud for frame {frame_idx + 1} (index {frame_idx}) has unexpected shape {pc_np.shape}. Needs (N, >=3). Skipping.")
+                continue
 
-        point_clouds_to_visualize.append(pcd)
+            # Extract XYZ coordinates (assuming they are the first 3 columns)
+            xyz = pc_np[:, :3]
 
-    # Visualize if we have point clouds to show
-    if point_clouds_to_visualize:
-        print(
-            f"Visualizing Frame {frame_indices_to_viz[0] + 1} (Red) and Frame {frame_indices_to_viz[1] + 1} (Blue)...")
-        o3d.visualization.draw_geometries(
-            point_clouds_to_visualize,
-            window_name=f"Scene {scene_name} - Frame {frame_indices_to_viz[0] + 1} (Red) & {frame_indices_to_viz[1] + 1} (Blue)",
-            width=800,
-            height=600
-        )
-    else:
-        print("No valid point clouds found for the selected frames to visualize.")
+            # Create Open3D point cloud object
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(xyz)
 
-    if args.vis and args.vis_position == 'aggregated_frames_global_static':
+            # Assign color
+            pcd.paint_uniform_color(colors[i])
+
+            point_clouds_to_visualize.append(pcd)
+
+        # Visualize if we have point clouds to show
+        if point_clouds_to_visualize:
+            print(
+                f"Visualizing Frame {frame_indices_to_viz[0] + 1} (Red) and Frame {frame_indices_to_viz[1] + 1} (Blue)...")
+            o3d.visualization.draw_geometries(
+                point_clouds_to_visualize,
+                window_name=f"Scene {scene_name} - Frame {frame_indices_to_viz[0] + 1} (Red) & {frame_indices_to_viz[1] + 1} (Blue)",
+                width=800,
+                height=600
+            )
+        else:
+            print("No valid point clouds found for the selected frames to visualize.")
+    ###############################################################################################################
+
+    ################################## Visualization #############################################################
+    if args.vis_aggregated_static_kiss_refined:
         visualize_pointcloud(lidar_pc_final_global, title=f"Aggregated Refined Static PC (Global) - Scene {scene_name}")
+    #############################################################################################################
 
-        ################## concatenate all semantic scene segments ########################
+    ################## concatenate all semantic scene segments ########################
     if lidar_pc_with_semantic_list_for_concat:
         if lidar_pc_with_semantic_list_for_concat[0].shape[1] > 5:
             lidar_pc_with_semantic_final_global = np.concatenate(lidar_pc_with_semantic_list_for_concat,
@@ -2419,26 +2515,42 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     lidar_pc_sensor_ids = lidar_pc_final_global_sensor_ids
     lidar_pc_with_semantic_sensor_ids = lidar_pc_with_semantic_final_global_sensor_ids
 
-    if args.vis and args.vis_position == 'aggregated_frames_global_static':
-        visualize_pointcloud(lidar_pc.T, title=f"Aggregated static PC in world coordinates")
+    ################################## Filtering of static aggregated point cloud #####################################
+    if args.filter_aggregated_static_pc and args.filter_mode != 'none':
+        pcd_o3d = o3d.geometry.PointCloud()
+        pcd_o3d.points = o3d.utility.Vector3dVector(lidar_pc[:3, :].T)
+        filtered_pcd_o3d, kept_indices = denoise_pointcloud(pcd_o3d, args.filter_mode, config,
+                                                            location_msg="aggregated static points")
+        lidar_pc = lidar_pc[:, kept_indices]
+        lidar_pc_sensor_ids = lidar_pc_sensor_ids[kept_indices]
+        lidar_pc_with_semantic = lidar_pc_with_semantic[:,
+                                 kept_indices]  # Only here if lidar_pc and lidar_pc_semantics are the same
+        lidar_pc_with_semantic_sensor_ids = lidar_pc_with_semantic_sensor_ids[kept_indices]
 
-    if args.filter_location in ['static_agg', 'all'] and args.filter_mode != 'none':
-        if lidar_pc.shape[1] > 0:
-            pcd_o3d = o3d.geometry.PointCloud()
-            pcd_o3d.points = o3d.utility.Vector3dVector(lidar_pc[:3, :].T)
-            filtered_pcd_o3d, kept_indices = denoise_pointcloud(pcd_o3d, args.filter_mode, config,
-                                                                location_msg="aggregated static points")
-            lidar_pc = lidar_pc[:, kept_indices]
-            lidar_pc_with_semantic = lidar_pc_with_semantic[:,
-                                     kept_indices]  # Only here if lidar_pc and lidar_pc_semantics are the same
 
-    """if args.filter_location in ['static_agg', 'both'] and args.filter_mode != 'none':
-        if lidar_pc_with_semantic.shape[0] > 0:
-            pcd_o3d = o3d.geometry.PointCloud()
-            pcd_o3d.points = o3d.utility.Vector3dVector(lidar_pc_with_semantic[:3, :].T)
-            denoise_pointcloud.location_msg = "aggregated static semantic points"
-            filtered_pcd_o3d, kept_indices = denoise_pointcloud(pcd_o3d, args.filter_mode, config)
-            lidar_pc_with_semantic = lidar_pc_with_semantic[:, kept_indices]"""  # Only needed if lidar_pc and lidar_pc are different pcs
+    """if args.filter_aggregated_static_pc and args.filter_mode != 'none':
+        pcd_o3d = o3d.geometry.PointCloud()
+        pcd_o3d.points = o3d.utility.Vector3dVector(lidar_pc_with_semantic[:3, :].T)
+        denoise_pointcloud.location_msg = "aggregated static semantic points"
+        filtered_pcd_o3d, kept_indices = denoise_pointcloud(pcd_o3d, args.filter_mode, config)
+        lidar_pc_with_semantic = lidar_pc_with_semantic[:, kept_indices]"""  # Only needed if lidar_pc and lidar_pc are different pcs
+    ###################################################################################################################
+    # ensure each point has a sensor id
+    assert lidar_pc.shape[1] == lidar_pc_sensor_ids.shape[0], (
+        f"point count ({lidar_pc.shape[1]}) != sensor_ids count ({lidar_pc_sensor_ids.shape[0]})"
+    )
+
+    # ensure each semantic point has a sensor id
+    assert lidar_pc_with_semantic.shape[1] == lidar_pc_with_semantic_sensor_ids.shape[0], (
+        f"semantic point count ({lidar_pc_with_semantic.shape[1]}) != "
+        f"semantic_sensor_ids count ({lidar_pc_with_semantic_sensor_ids.shape[0]})"
+    )
+
+    ############################## Visualization ######################################################
+
+    if args.vis_filtered_aggregated_static:
+        visualize_pointcloud(lidar_pc.T, title=f"Aggregated Refined Static PC (Global) - Scene {scene_name}")
+    ###################################################################################################
 
     ################## concatenate all object segments (including non-key frames)  ########################
     object_token_zoo = []  # stores unique object tokens from all frames
@@ -2455,7 +2567,6 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
     object_points_dict = {}  # initialize an empty dictionary to hold aggregated object points
     object_sids_dict = {}
-    object_icp_voxel_size = config.get('object_icp_voxel_size', 0.1)  # Get object ICP voxel size from config
 
     print("\nAggregating object points...")
     for query_object_token in tqdm(object_token_zoo,
@@ -2591,7 +2702,6 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             f"Ego semantic point_cloud shape: {point_cloud_with_semantic.shape} with sensor ids: {point_cloud_with_semantic_sensor_ids.shape}")
         # Optional: print first few points' ego coords + labels: print(point_cloud_with_semantic[:,:5])
 
-        # --- Check: Do shapes still match? ---
         assert point_cloud.shape[1] == point_cloud_with_semantic.shape[1], \
             f"Ego point counts mismatch after transform: {point_cloud.shape[1]} vs {point_cloud_with_semantic.shape[1]}"
 
@@ -2776,11 +2886,19 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         scene_points_sids = scene_points_sids[mask]
         print(f"Scene points after applying range filtering: {scene_points.shape}")
 
-        visualize_pointcloud_bbox(scene_points,
+        ################################## Visualize #####################################################
+        """visualize_pointcloud_bbox(scene_points,
                                   boxes=boxes,
                                   title=f"Fused dynamic and static PC + BBoxes + Ego BBox - Frame {i}",
                                   self_vehicle_range=self_range,
-                                  vis_self_vehicle=True)
+                                  vis_self_vehicle=True)"""
+        if args.vis_combined_static_dynamic_pc:
+            visualize_pointcloud_bbox(scene_points,
+                                      boxes=boxes,
+                                      title=f"Fused dynamic and static PC + BBoxes + Ego BBox - Frame {i}",
+                                      self_vehicle_range=self_range,
+                                      vis_self_vehicle=True)
+        ################################################################################################
 
         ################## get semantics of sparse points  ##############
         print(f"Scene semantic points before applying range filtering: {scene_semantic_points.shape}")
@@ -2790,17 +2908,32 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         scene_semantic_points_sids = scene_semantic_points_sids[mask]
         print(f"Scene semantic points after applying range filtering: {scene_semantic_points.shape}")
 
-        if args.filter_location in ['final', 'all'] and args.filter_mode != 'none':
+        ################################## Filtering #################################################
+        if args.filter_combined_static_dynamic_pc and args.filter_mode != 'none':
             print(f"Filtering {scene_points.shape}")
-            if scene_points.shape[0] > 0:
-                pcd_to_filter = o3d.geometry.PointCloud()
-                pcd_to_filter.points = o3d.utility.Vector3dVector(scene_points[:, :3])
-                print('test')
+            pcd_to_filter = o3d.geometry.PointCloud()
+            pcd_to_filter.points = o3d.utility.Vector3dVector(scene_points[:, :3])
 
-                filtered_pcd, _ = denoise_pointcloud(pcd_to_filter, args.filter_mode, config,
-                                                     location_msg="final scene points")
-                scene_points = np.asarray(filtered_pcd.points)
+            filtered_pcd, kept_indices = denoise_pointcloud(pcd_to_filter, args.filter_mode, config,
+                                                 location_msg="final scene points")
+            scene_points = np.asarray(filtered_pcd.points)
+            scene_points_sids = scene_points_sids[kept_indices]
+            scene_semantic_points = scene_semantic_points[kept_indices]
+            scene_semantic_points_sids = scene_semantic_points_sids[kept_indices]
+        ############################################################################################
 
+        # ensure each combined scene point has a sensor id
+        assert scene_points.shape[0] == scene_points_sids.shape[0], (
+            f"scene_points count ({scene_points.shape[0]}) != scene_points_sids count ({scene_points_sids.shape[0]})"
+        )
+
+        # ensure each semantic scene point has a sensor id
+        assert scene_semantic_points.shape[0] == scene_semantic_points_sids.shape[0], (
+            f"scene_semantic_points count ({scene_semantic_points.shape[0]}) != "
+            f"scene_semantic_points_sids count ({scene_semantic_points_sids.shape[0]})"
+        )
+
+        ############################ Meshing #######################################################
         if args.meshing:
             print("--- Starting Meshing and Voxelization---")
             print(f"Shape of scene points before meshing: {scene_points.shape}")
@@ -2983,11 +3116,11 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                 # pick the proper origin for each LiDAR hit by indexing with your per‐point sensor‐ID
                 #    scene_points_sids is (N,) telling which sensor produced each point
                 points_origin = sensor_origins[scene_semantic_points_sids]  # (N,3)
-                print(points_origin.shape)
+                print(f"Points origin shape: {points_origin.shape}")
                 points_label = scene_semantic_points[:, 3].astype(int)
-                print(points_label.shape)
+                print(f"Points label shape: {points_label.shape}")
                 points = scene_semantic_points[:, :3]
-                print(points.shape)
+                print(f"Points shape: {points.shape}")
 
                 print("Creating Lidar visibility masks using GPU...")
                 # --- Time the GPU execution ---
@@ -3014,19 +3147,20 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                 print(f"GPU Voxel label shape: {voxel_label_gpu.shape}")
                 print("Finished Lidar visibility masks (GPU).")
 
-                voxel_size_for_viz = np.array([voxel_size] * 3)
-                visualize_occupancy_o3d(
-                    voxel_state_gpu,
-                    voxel_label_gpu,  # This is now your final semantic grid
-                    pc_range=pc_range,
-                    voxel_size=voxel_size_for_viz,
-                    class_color_map=CLASS_COLOR_MAP,  # Make sure this is globally defined
-                    default_color=DEFAULT_COLOR,  # Make sure this is globally defined
-                    show_semantics=True,
-                    show_free=True,
-                    show_unobserved=False,
-                    point_size=5.0
-                )
+                if args.vis_lidar_visibility:
+                    voxel_size_for_viz = np.array([voxel_size] * 3)
+                    visualize_occupancy_o3d(
+                        voxel_state_gpu,
+                        voxel_label_gpu,  # This is now your final semantic grid
+                        pc_range=pc_range,
+                        voxel_size=voxel_size_for_viz,
+                        class_color_map=CLASS_COLOR_MAP,  # Make sure this is globally defined
+                        default_color=DEFAULT_COLOR,  # Make sure this is globally defined
+                        show_semantics=True,
+                        show_free=True,
+                        show_unobserved=False,
+                        point_size=5.0
+                    )
 
                 run_cpu_comparison = False
                 if run_cpu_comparison:
@@ -3056,19 +3190,20 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
                     print("Finished Lidar visibility masks")
 
-                    print("Visualizing with Semantics and Free")
-                    visualize_occupancy_o3d(
-                        voxel_state,
-                        voxel_label,
-                        pc_range=pc_range,
-                        voxel_size=voxel_size_masks,  # Pass as array
-                        class_color_map=CLASS_COLOR_MAP,
-                        default_color=DEFAULT_COLOR,
-                        show_semantics=True,
-                        show_free=True,
-                        show_unobserved=False,
-                        point_size=5.0
-                    )
+                    if args.vis_lidar_visibility:
+                        print("Visualizing with Semantics and Free")
+                        visualize_occupancy_o3d(
+                            voxel_state,
+                            voxel_label,
+                            pc_range=pc_range,
+                            voxel_size=voxel_size_masks,  # Pass as array
+                            class_color_map=CLASS_COLOR_MAP,
+                            default_color=DEFAULT_COLOR,
+                            show_semantics=True,
+                            show_free=True,
+                            show_unobserved=False,
+                            point_size=5.0
+                        )
 
                 occupied_mask = occupancy_grid != FREE_LEARNING_INDEX
                 total_occupied_voxels = np.sum(occupied_mask)
@@ -3122,64 +3257,67 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                 temp_voxel_label_for_cam_viz[mask_camera == 1] = voxel_label_gpu[
                     mask_camera == 1]
 
-                voxel_size_arr_viz = np.array([voxel_size] * 3) if isinstance(voxel_size, (int, float)) else np.array(
-                    voxel_size)
+                if args.vis_camera_visibility:
+                    voxel_size_arr_viz = np.array([voxel_size] * 3) if isinstance(voxel_size, (int, float)) else np.array(
+                        voxel_size)
 
-                visualize_occupancy_o3d(
-                    voxel_state=temp_voxel_state_for_cam_viz,
-                    voxel_label=temp_voxel_label_for_cam_viz,
-                    pc_range=pc_range,
-                    voxel_size=voxel_size_arr_viz,
-                    class_color_map=CLASS_COLOR_MAP,
-                    default_color=DEFAULT_COLOR,
-                    show_semantics=True,  # Show semantics of camera-visible regions
-                    show_free=False,  # Not showing LiDAR-free for this specific mask viz
-                    show_unobserved=True,  # Shows what's NOT camera visible as unobserved
-                    point_size=3.0
-                )
+                    visualize_occupancy_o3d(
+                        voxel_state=temp_voxel_state_for_cam_viz,
+                        voxel_label=temp_voxel_label_for_cam_viz,
+                        pc_range=pc_range,
+                        voxel_size=voxel_size_arr_viz,
+                        class_color_map=CLASS_COLOR_MAP,
+                        default_color=DEFAULT_COLOR,
+                        show_semantics=True,  # Show semantics of camera-visible regions
+                        show_free=False,  # Not showing LiDAR-free for this specific mask viz
+                        show_unobserved=False,  # Shows what's NOT camera visible as unobserved
+                        point_size=3.0
+                    )
 
-                print(f"Calculating camera visibility for cameras (CPU): {cameras}")
+                if run_cpu_comparison:
+                    print(f"Calculating camera visibility for cameras (CPU): {cameras}")
 
-                # Ensure voxel_size and occ_size are passed as numpy arrays if the function expects them
-                voxel_size_arr = np.array([voxel_size] * 3) if isinstance(voxel_size, (int, float)) else np.array(
-                    voxel_size)
-                occ_size_arr = np.array(occ_size)
+                    # Ensure voxel_size and occ_size are passed as numpy arrays if the function expects them
+                    voxel_size_arr = np.array([voxel_size] * 3) if isinstance(voxel_size, (int, float)) else np.array(
+                        voxel_size)
+                    occ_size_arr = np.array(occ_size)
 
-                start_time_cam_vis = time.perf_counter()
-                mask_camera = calculate_camera_visibility_cpu(
-                    trucksc=trucksc,
-                    current_sample_token=frame_dict['sample_token'],  # Pass current sample token
-                    lidar_voxel_state=final_voxel_state_to_save,  # Output from LiDAR visibility
-                    pc_range_params=pc_range,
-                    voxel_size_params=voxel_size_arr,
-                    spatial_shape_params=occ_size_arr,
-                    camera_names=cameras,
-                    DEPTH_MAX=config.get('camera_ray_depth_max', 70.0),  # Make it configurable
-                    FREE_LEARNING_INDEX=FREE_LEARNING_INDEX
-                )
-                end_time_cam_vis = time.perf_counter()
-                print(f"CPU Camera visibility calculation took: {end_time_cam_vis - start_time_cam_vis:.4f} seconds")
+                    start_time_cam_vis = time.perf_counter()
+                    mask_camera = calculate_camera_visibility_cpu(
+                        trucksc=trucksc,
+                        current_sample_token=frame_dict['sample_token'],  # Pass current sample token
+                        lidar_voxel_state=final_voxel_state_to_save,  # Output from LiDAR visibility
+                        pc_range_params=pc_range,
+                        voxel_size_params=voxel_size_arr,
+                        spatial_shape_params=occ_size_arr,
+                        camera_names=cameras,
+                        DEPTH_MAX=config.get('camera_ray_depth_max', 70.0),  # Make it configurable
+                        FREE_LEARNING_INDEX=FREE_LEARNING_INDEX
+                    )
+                    end_time_cam_vis = time.perf_counter()
+                    print(f"CPU Camera visibility calculation took: {end_time_cam_vis - start_time_cam_vis:.4f} seconds")
 
-                print("Visualizing Camera Visibility Mask Results...")
-                temp_voxel_state_for_cam_viz = np.zeros_like(mask_camera, dtype=np.uint8)
-                temp_voxel_state_for_cam_viz[mask_camera == 1] = STATE_OCCUPIED
+                    print("Visualizing Camera Visibility Mask Results...")
+                    temp_voxel_state_for_cam_viz = np.zeros_like(mask_camera, dtype=np.uint8)
+                    temp_voxel_state_for_cam_viz[mask_camera == 1] = STATE_OCCUPIED
 
-                # Create dummy labels or use a uniform color for visualization
-                temp_voxel_label_for_cam_viz = np.full_like(mask_camera, FREE_LEARNING_INDEX, dtype=np.uint8)
+                    # Create dummy labels or use a uniform color for visualization
+                    temp_voxel_label_for_cam_viz = np.full_like(mask_camera, FREE_LEARNING_INDEX, dtype=np.uint8)
 
-                visualize_occupancy_o3d(
-                    temp_voxel_state_for_cam_viz,
-                    temp_voxel_label_for_cam_viz,  # Using dummy/uniform labels for camera mask
-                    pc_range=pc_range,
-                    voxel_size=voxel_size_arr,
-                    class_color_map=CLASS_COLOR_MAP,
-                    default_color=DEFAULT_COLOR,
-                    show_semantics=False,  # Set to False to use a uniform color (red by default for STATE_OCCUPIED)
-                    # or True if you populated temp_voxel_label_for_cam_viz with actual semantics
-                    show_free=False,  # Not showing free for this specific mask viz
-                    show_unobserved=True,  # Shows what's NOT camera visible as unobserved
-                    point_size=3.0
-                )
+                    if args.vis_camera_visibility:
+                        visualize_occupancy_o3d(
+                            temp_voxel_state_for_cam_viz,
+                            temp_voxel_label_for_cam_viz,  # Using dummy/uniform labels for camera mask
+                            pc_range=pc_range,
+                            voxel_size=voxel_size_arr,
+                            class_color_map=CLASS_COLOR_MAP,
+                            default_color=DEFAULT_COLOR,
+                            show_semantics=False,  # Set to False to use a uniform color (red by default for STATE_OCCUPIED)
+                            # or True if you populated temp_voxel_label_for_cam_viz with actual semantics
+                            show_free=False,  # Not showing free for this specific mask viz
+                            show_unobserved=True,  # Shows what's NOT camera visible as unobserved
+                            point_size=3.0
+                        )
 
         print(
             f"Shape of dense_voxels_with_semantic_voxelcoords for saving: {dense_voxels_with_semantic_voxelcoords_save.shape}")
@@ -3243,8 +3381,8 @@ if __name__ == '__main__':
 
     parse = ArgumentParser()
 
-    # Define Command-Line Arguments
-    parse.add_argument('--dataset', type=str, default='truckscenes')  # Dataset selection with default: "truckScenes
+    ############################## Define Command-Line Arguments #########################################################################
+    parse.add_argument('--dataset', type=str, default='truckscenes')  # Dataset selection with default: "truckScenes"
     parse.add_argument('--config_path', type=str,
                        default='config_truckscenes.yaml')  # Configuration file path with default: "config.yaml"
     parse.add_argument('--split', type=str,
@@ -3261,20 +3399,47 @@ if __name__ == '__main__':
                        default='./truckscenes_val_list.txt')  # text file containing validation scene tokens, default: "./truckscenes_val_list.txt"
     parse.add_argument('--label_mapping', type=str,
                        default='truckscenes.yaml')  # YAML file containing label mappings, default: "truckscenes.yaml"
-    parse.add_argument('--meshing', action='store_true', help='Enable meshing')
-    parse.add_argument('--icp_refinement', action='store_true', help='Enable ICP refinement')
-    parse.add_argument('--icp_refinement_objects', action='store_true',
-                       help='Enable ICP refinement of canonical object segments')
+
     parse.add_argument('--load_mode', type=str, default='pointwise')  # pointwise or rigid
+
+    parse.add_argument('--keyframe_only_static', action='store_true', help='Enable that only keyframes are used to build static map')
+    parse.add_argument('--keyframe_only_dynamic', action='store_true', help='Enable that only keyframes are used to build dynamic map')
+
+    ####################### Kiss-ICP refinement ##########################################
+    parse.add_argument('--icp_refinement', action='store_true', help='Enable ICP refinement')
+
+    ####################### Meshing #####################################################
+    parse.add_argument('--meshing', action='store_true', help='Enable meshing')
+
+    ######################## Filtering ####################################################
     parse.add_argument('--filter_mode', type=str, default='none', choices=['none', 'sor', 'ror', 'both'],
                        help='Noise filtering method to apply before meshing')
-    parse.add_argument('--filter_location', type=str, default='none',
-                       choices=['none', 'static_agg', 'final', 'ego_static', 'all'],
-                       help='Where to apply noise filtering: none, static_agg (aggregated static), final (final scene points), or all')
-    parse.add_argument('--vis', action='store_true', help='Enable visualization of intermediate point clouds')
-    parse.add_argument('--vis_position', type=str, default='fused_sensors_ego',
-                       choices=['fused_sensors_ego', 'fused_sensors_ego_boxes_static', 'fused_sensors_global_static',
-                                'aggregated_frames_global_static', 'final'], )
+
+    parse.add_argument('--filter_lidar_intensity', action='store_true', help='Enable lidar intensity filtering')
+
+    parse.add_argument('--filter_raw_pc', action='store_true', help='Enable raw pc filtering')
+    parse.add_argument('--filter_static_pc', action='store_true', help='Enable static pc filtering')
+    parse.add_argument('--filter_aggregated_static_pc', action='store_true', help='Enable aggregated static pc filtering')
+    parse.add_argument('--filter_combined_static_dynamic_pc', action='store_true', help='Enable combined static and dynamic pc filtering')
+
+    ########################## Visualization ################################################
+    parse.add_argument('--vis_raw_pc', action='store_true', help='Enable raw pc visualization')
+    parse.add_argument('--vis_static_pc', action='store_true', help='Enable static pc visualization')
+    parse.add_argument('--vis_static_pc_global', action='store_true', help='Enable static pc global visualization')
+    parse.add_argument('--vis_lidar_intensity_filtered', action='store_true', help='Enable lidar intensity filtered visualization')
+
+    parse.add_argument('--vis_aggregated_static_ego_i_pc', action='store_true', help='Enable aggregated static ego i pc visualization')
+    parse.add_argument('--vis_aggregated_static_ego_ref_pc', action='store_true', help='Enable aggregated static ego ref pc visualization')
+    parse.add_argument('--vis_aggregated_static_global_pc', action='store_true', help='Enable aggregated static global pc visualization')
+    parse.add_argument('--vis_aggregated_raw_pc_ego_i', action='store_true', help='Enable aggregated raw pc ego i visualization')
+    parse.add_argument('--vis_static_frame_comparison_kiss_refined', action='store_true', help='Enable static frame comparison kiss refinement')
+    parse.add_argument('--vis_aggregated_static_kiss_refined', action='store_true', help='Enable aggregated static kiss refinement')
+    parse.add_argument('--vis_filtered_aggregated_static', action='store_true', help='Enable filtered aggregated static kiss refinement')
+    parse.add_argument('--vis_combined_static_dynamic_pc', action='store_true', help='Enable combined static and dynamic pc visualization')
+
+    parse.add_argument('--vis_lidar_visibility', action='store_true', help='Enable lidar visibility visualization')
+    parse.add_argument('--vis_camera_visibility', action='store_true', help='Enable camera visibility visualization')
+
     args = parse.parse_args()
 
     if args.dataset == 'truckscenes':  # check dataset type
