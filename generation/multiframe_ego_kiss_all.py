@@ -2404,29 +2404,114 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
                 refined_lidar_pc_with_semantic_list.append(points_transformed)
 
+    # Determine the source lists for aggregation based on ICP refinement
     if not args.icp_refinement:
-        refined_lidar_pc_list = unrefined_pc_ego_ref_list
-        refined_lidar_pc_with_semantic_list = unrefined_sem_pc_ego_ref_list
-        poses_kiss_icp = None
+        print("ICP refinement is OFF. Using unrefined points (in reference ego frame) for aggregation.")
+        # These are lists of (N, D) arrays, already in reference ego frame
+        source_pc_list_all_frames = unrefined_pc_ego_ref_list
+        source_sem_pc_list_all_frames = unrefined_sem_pc_ego_ref_list
+        source_pc_sids_list_all_frames = unrefined_pc_ego_ref_list_sensor_ids
+        source_sem_sids_list_all_frames = unrefined_sem_pc_ego_ref_list_sensor_ids
+    else:
+        print("ICP refinement is ON. Using KISS-ICP refined points for aggregation.")
+        # These are lists of (N, D) arrays, in the KISS-ICP refined global/map frame
+        source_pc_list_all_frames = refined_lidar_pc_list
+        source_sem_pc_list_all_frames = refined_lidar_pc_with_semantic_list
+        # SIDs lists for refined PCs are typically the same as their unrefined counterparts,
+        # as ICP only affects poses, not point identities or origins relative to sensor.
+        # IMPORTANT: Ensure these unrefined SIDs lists correspond to the frames in refined_lidar_pc_list
+        source_pc_sids_list_all_frames = unrefined_pc_ego_list_sensor_ids  # SIDs from ego_i list
+        source_sem_sids_list_all_frames = unrefined_sem_pc_ego_list_sensor_ids  # SIDs from ego_i list
 
-    # Assuming refined lists contain (Features, N) based on appending .T earlier
-    lidar_pc_list_for_concat = [pc for pc in refined_lidar_pc_list if
-                                pc.shape[1] > 0]  # Transpose to (N, Features) and filter empty
-    lidar_pc_with_semantic_list_for_concat = [pc for pc in refined_lidar_pc_with_semantic_list if
-                                              pc.shape[1] > 0]  # Transpose to (N, Features) and filter empty
+    #################################### Filtering based on if only keyframes should be used ###########################
+    print(f"Static map aggregation: --static_map_keyframes_only is {args.static_map_keyframes_only}")
+
+    lidar_pc_list_for_concat = []
+    lidar_pc_sids_list_for_concat = []
+    lidar_pc_with_semantic_list_for_concat = []
+    lidar_pc_with_semantic_sids_list_for_concat = []
+
+    for idx, frame_info in enumerate(dict_list):
+        is_key = frame_info['is_key_frame']
+        # Decide whether to include this frame's points in the static map
+        include_in_static_map = True
+        if args.static_map_keyframes_only and not is_key:
+            include_in_static_map = False
+
+        if include_in_static_map:
+            print(f"  Including frame {idx} (Keyframe: {is_key}) in static map aggregation.")
+            # Add static points
+            if idx < len(source_pc_list_all_frames) and source_pc_list_all_frames[idx].shape[0] > 0:
+                lidar_pc_list_for_concat.append(source_pc_list_all_frames[idx])
+                if idx < len(source_pc_sids_list_all_frames) and source_pc_sids_list_all_frames[idx].shape[0] > 0:
+                    lidar_pc_sids_list_for_concat.append(source_pc_sids_list_all_frames[idx])
+                elif source_pc_list_all_frames[idx].shape[
+                    0] > 0:  # Points exist but SIDs might be empty if something went wrong
+                    print(
+                        f"Warning: Frame {idx} has {source_pc_list_all_frames[idx].shape[0]} static points but missing/empty SIDs.")
+
+            # Add semantic static points
+            if idx < len(source_sem_pc_list_all_frames) and source_sem_pc_list_all_frames[idx].shape[0] > 0:
+                lidar_pc_with_semantic_list_for_concat.append(source_sem_pc_list_all_frames[idx])
+                if idx < len(source_sem_sids_list_all_frames) and source_sem_sids_list_all_frames[idx].shape[
+                    0] > 0:
+                    lidar_pc_with_semantic_sids_list_for_concat.append(source_sem_sids_list_all_frames[idx])
+                elif source_sem_pc_list_all_frames[idx].shape[0] > 0:
+                    print(
+                        f"Warning: Frame {idx} has {source_sem_pc_list_all_frames[idx].shape[0]} semantic points but missing/empty SIDs.")
+        else:
+            print(
+                f"  Skipping frame {idx} (Keyframe: {is_key}) for static map aggregation due to --static_map_keyframes_only.")
+
+    ###################################################################################################################
 
     if lidar_pc_list_for_concat:
+        print(f"Concatenating pc from {len(lidar_pc_list_for_concat)} frames")
         # Concatenate along points axis (axis=0)
         lidar_pc_final_global = np.concatenate(lidar_pc_list_for_concat, axis=0)
         print(f"Concatenated refined static global points. Shape: {lidar_pc_final_global.shape}")
     else:
-        lidar_pc_final_global = np.zeros((0, refined_lidar_pc_list[0].shape[0] if refined_lidar_pc_list else 3),
-                                         dtype=np.float64)  # Empty array with correct feature count
-        print("Concatenated refined static global points resulted in an empty array.")
+        sys.exit()
 
-    lidar_pc_final_global_sensor_ids = np.concatenate(unrefined_pc_ego_ref_list_sensor_ids, axis=0)
+    if lidar_pc_sids_list_for_concat:
+        print(f"Concatenating pc sensor ids from {len(lidar_pc_sids_list_for_concat)} frames")
+        lidar_pc_final_global_sensor_ids = np.concatenate(lidar_pc_sids_list_for_concat, axis=0)
+        print(f"Concatenated refined static global point sensor ids. Shape: {lidar_pc_final_global_sensor_ids.shape}")
+    else:
+        sys.exit()
 
     assert lidar_pc_final_global.shape[0] == lidar_pc_final_global_sensor_ids.shape[0]
+
+    ################################## Visualization #############################################################
+    if args.vis_aggregated_static_kiss_refined:
+        visualize_pointcloud(lidar_pc_final_global, title=f"Aggregated Refined Static PC (Global) - Scene {scene_name}")
+    #############################################################################################################
+
+    ################## concatenate all semantic scene segments ########################
+    if lidar_pc_with_semantic_list_for_concat:
+        print(f"Concatenating semantic pc from {len(lidar_pc_with_semantic_list_for_concat)} frames")
+        lidar_pc_with_semantic_final_global = np.concatenate(lidar_pc_with_semantic_list_for_concat,
+                                                             axis=0)  # Shape (N_total, Features)
+        print(f"Concatenated refined semantic global points. Shape: {lidar_pc_with_semantic_final_global.shape}")
+    else:
+        sys.exit()
+
+    if lidar_pc_with_semantic_sids_list_for_concat:
+        print(f"Concatenating pc from {len(lidar_pc_with_semantic_sids_list_for_concat)} frames")
+        lidar_pc_with_semantic_final_global_sensor_ids = np.concatenate(lidar_pc_with_semantic_sids_list_for_concat, axis=0)
+        print(f"Concatenated refined semantic static global point sensor ids. Shape: {lidar_pc_with_semantic_final_global_sensor_ids.shape}")
+    else:
+        sys.exit()
+
+    assert lidar_pc_with_semantic_final_global.shape[0] == lidar_pc_with_semantic_final_global_sensor_ids.shape[0]
+
+    ####################################################################################################################
+
+    lidar_pc = lidar_pc_final_global.T
+    lidar_pc_with_semantic = lidar_pc_with_semantic_final_global.T
+
+    lidar_pc_sensor_ids = lidar_pc_final_global_sensor_ids
+    lidar_pc_with_semantic_sensor_ids = lidar_pc_with_semantic_final_global_sensor_ids
 
     ########################################### Visualization #########################################################
     if args.vis_static_frame_comparison_kiss_refined:
@@ -2438,9 +2523,9 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         ]
 
         # Check if the list is long enough
-        if len(refined_lidar_pc_list) <= max(frame_indices_to_viz):
+        if len(lidar_pc_list_for_concat) <= max(frame_indices_to_viz):
             print(
-                f"Error: refined_lidar_pc_list only has {len(refined_lidar_pc_list)} elements. Cannot access frame {max(frame_indices_to_viz) + 1}.")
+                f"Error: refined_lidar_pc_list only has {len(lidar_pc_list_for_concat)} elements. Cannot access frame {max(frame_indices_to_viz) + 1}.")
             # Handle error appropriately, maybe exit or skip visualization
             sys.exit(1)  # Or 'pass' if you want to continue without this visualization
 
@@ -2448,7 +2533,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
         for i, frame_idx in enumerate(frame_indices_to_viz):
             # Get the point cloud for the specific frame
-            pc_np = refined_lidar_pc_list[frame_idx]
+            pc_np = lidar_pc_list_for_concat[frame_idx]
 
             # Ensure it's not empty and has the right dimensions
             if pc_np is None or pc_np.shape[0] == 0:
@@ -2484,36 +2569,6 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         else:
             print("No valid point clouds found for the selected frames to visualize.")
     ###############################################################################################################
-
-    ################################## Visualization #############################################################
-    if args.vis_aggregated_static_kiss_refined:
-        visualize_pointcloud(lidar_pc_final_global, title=f"Aggregated Refined Static PC (Global) - Scene {scene_name}")
-    #############################################################################################################
-
-    ################## concatenate all semantic scene segments ########################
-    if lidar_pc_with_semantic_list_for_concat:
-        if lidar_pc_with_semantic_list_for_concat[0].shape[1] > 5:
-            lidar_pc_with_semantic_final_global = np.concatenate(lidar_pc_with_semantic_list_for_concat,
-                                                                 axis=1)  # Shape (N_total, Features)
-        else:
-            lidar_pc_with_semantic_final_global = np.concatenate(lidar_pc_with_semantic_list_for_concat,
-                                                                 axis=0)  # Shape (N_total, Features)
-        print(f"Concatenated refined semantic global points. Shape: {lidar_pc_with_semantic_final_global.shape}")
-    else:
-        lidar_pc_with_semantic_final_global = np.zeros(
-            (0, refined_lidar_pc_with_semantic_list[0].shape[0] if refined_lidar_pc_with_semantic_list else 4),
-            dtype=np.float64)  # Empty array with correct feature count
-        print("Concatenated refined semantic global points resulted in an empty array.")
-
-    lidar_pc_with_semantic_final_global_sensor_ids = np.concatenate(unrefined_sem_pc_ego_list_sensor_ids, axis=0)
-
-    assert lidar_pc_with_semantic_final_global.shape[0] == lidar_pc_with_semantic_final_global_sensor_ids.shape[0]
-
-    lidar_pc = lidar_pc_final_global.T
-    lidar_pc_with_semantic = lidar_pc_with_semantic_final_global.T
-
-    lidar_pc_sensor_ids = lidar_pc_final_global_sensor_ids
-    lidar_pc_with_semantic_sensor_ids = lidar_pc_with_semantic_final_global_sensor_ids
 
     ################################## Filtering of static aggregated point cloud #####################################
     if args.filter_aggregated_static_pc and args.filter_mode != 'none':
@@ -2552,10 +2607,24 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         visualize_pointcloud(lidar_pc.T, title=f"Aggregated Refined Static PC (Global) - Scene {scene_name}")
     ###################################################################################################
 
+    source_dict_list_for_objects = dict_list
+
+    if args.dynamic_map_keyframes_only:
+        print("Dynamic object aggregation will use ONLY KEYFRAMES.")
+        source_dict_list_for_objects = [fd for fd in dict_list if fd['is_key_frame']]
+        if not source_dict_list_for_objects:
+            print(
+                "Warning: --dynamic_map_keyframes_only is set, but no keyframes found in dict_list. Object data will be empty.")
+    else:
+        print("Dynamic object aggregation will use ALL FRAMES.")
+
+    print(f"Dynamic object aggregation will use {len(source_dict_list_for_objects)} frames.")
+
+
     ################## concatenate all object segments (including non-key frames)  ########################
     object_token_zoo = []  # stores unique object tokens from all frames
     object_semantic = []  # stores semantic category corresponding to each unique object
-    for frame_dict in dict_list:  # Iterate through frames and collect unique objects
+    for frame_dict in source_dict_list_for_objects:  # Iterate through frames and collect unique objects
         for i, object_token in enumerate(frame_dict['object_tokens']):
             if object_token not in object_token_zoo:  # Filter and append object tokens
                 if (frame_dict['object_points_list'][i].shape[
@@ -2573,7 +2642,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                                    desc="Aggregating Objects"):  # Loop through each unique object token
         canonical_segments_list = []
         canonical_segments_sids_list = []
-        for frame_dict in dict_list:  # iterates through all frames
+        for frame_dict in source_dict_list_for_objects:  # iterates through all frames
             if query_object_token in frame_dict['object_tokens']:  # Check if the object exists in this frame
                 obj_idx = frame_dict['object_tokens'].index(query_object_token)  # Find its index
                 object_points = frame_dict['object_points_list'][obj_idx]  # retrieve raw object points
@@ -2836,6 +2905,13 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                         object_semantic_sids_list.append(points_sids)
 
                     break  # No need to check further once matched
+
+        if args.vis_static_before_combined_dynamic:
+            visualize_pointcloud_bbox(point_cloud.T,
+                                      boxes=boxes,
+                                      title=f"Fused static PC before combineding with dynamic points + BBoxes + Ego BBox - Frame {i}",
+                                      self_vehicle_range=self_range,
+                                      vis_self_vehicle=True)
 
         """temp_points_filename = f'frame_{i}_temp_points.npy'
         sem_temp_points_filename = f'frame_{i}_sem_temp_points.npy'
@@ -3402,8 +3478,8 @@ if __name__ == '__main__':
 
     parse.add_argument('--load_mode', type=str, default='pointwise')  # pointwise or rigid
 
-    parse.add_argument('--keyframe_only_static', action='store_true', help='Enable that only keyframes are used to build static map')
-    parse.add_argument('--keyframe_only_dynamic', action='store_true', help='Enable that only keyframes are used to build dynamic map')
+    parse.add_argument('--static_map_keyframes_only', action='store_true', help='Build the final static map using only keyframes (after ICP, if enabled, ran on all frames).')
+    parse.add_argument('--dynamic_map_keyframes_only', action='store_true', help='Aggregate dynamic object points using only segments from keyframes..')
 
     ####################### Kiss-ICP refinement ##########################################
     parse.add_argument('--icp_refinement', action='store_true', help='Enable ICP refinement')
@@ -3435,6 +3511,7 @@ if __name__ == '__main__':
     parse.add_argument('--vis_static_frame_comparison_kiss_refined', action='store_true', help='Enable static frame comparison kiss refinement')
     parse.add_argument('--vis_aggregated_static_kiss_refined', action='store_true', help='Enable aggregated static kiss refinement')
     parse.add_argument('--vis_filtered_aggregated_static', action='store_true', help='Enable filtered aggregated static kiss refinement')
+    parse.add_argument('--vis_static_before_combined_dynamic', action='store_true', help='Enable static pc visualization before combined with dynmanic points')
     parse.add_argument('--vis_combined_static_dynamic_pc', action='store_true', help='Enable combined static and dynamic pc visualization')
 
     parse.add_argument('--vis_lidar_visibility', action='store_true', help='Enable lidar visibility visualization')
