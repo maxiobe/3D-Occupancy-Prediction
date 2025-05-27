@@ -774,7 +774,9 @@ def ray_casting(ray_start, ray_end, pc_range, voxel_size, spatial_shape, EPS=1e-
 
 
 def calculate_lidar_visibility(points, points_origin, points_label,
-                               pc_range, voxel_size, spatial_shape, occupancy_grid, FREE_LEARNING_INDEX):
+                               pc_range, voxel_size, spatial_shape, occupancy_grid, FREE_LEARNING_INDEX,
+                               points_sensor_indices,
+                               sensor_max_ranges):
     """
     points:        (N,3) array of LiDAR hits
     points_origin:(N,3) corresponding sensor origins
@@ -783,18 +785,14 @@ def calculate_lidar_visibility(points, points_origin, points_label,
       voxel_state: (H,W,Z) 0=NOT_OBS,1=FREE,2=OCC
       voxel_label: (H,W,Z) semantic label (FREE_LABEL if no hit)
     """
-    H, W, Z = spatial_shape
-    FREE_LABEL = -1
-    NOT_OBS, FREE, OCC = 0, 1, 2
+    NOT_OBS, FREE, OCC = STATE_UNOBSERVED, STATE_FREE, STATE_OCCUPIED
 
     voxel_occ_count = np.zeros(spatial_shape, int)
     voxel_free_count = np.zeros(spatial_shape, int)
-    voxel_label = np.full(spatial_shape, FREE_LABEL, int)
+    voxel_label = np.full(spatial_shape, FREE_LEARNING_INDEX, int)
 
     # for each LiDAR point
-    for i in range(points.shape[0]):
-        if i % 10000 == 0:
-            print(f"Processed points {i}...")
+    for i in tqdm(range(points.shape[0]), desc='Processing lidar points...'):
         start = points_origin[i]
         end = points[i]
         # direct hit voxel
@@ -803,12 +801,20 @@ def calculate_lidar_visibility(points, points_origin, points_label,
             voxel_occ_count[tuple(actual_hit_voxel_indices)] += 1
             voxel_label[tuple(actual_hit_voxel_indices)] = int(points_label[i])
         # walk the ray up to the point
-        for vox in ray_casting(start, end, pc_range, voxel_size, spatial_shape):
-            occupancy_grid_value = occupancy_grid[vox]
-            if occupancy_grid_value != FREE_LEARNING_INDEX:
-                break
-            else:
-                voxel_free_count[vox] += 1
+        sensor_idx_of_point = points_sensor_indices[i]
+        max_range_for_this_sensor = sensor_max_ranges[sensor_idx_of_point]
+        current_distance_to_hit = np.linalg.norm(end - start)
+
+        if current_distance_to_hit <= max_range_for_this_sensor:
+            for vox_tuple in ray_casting(start, end, pc_range, voxel_size, spatial_shape):
+                if np.array_equal(np.array(vox_tuple), actual_hit_voxel_indices):
+                    continue
+
+                occupancy_grid_value = occupancy_grid[vox_tuple]
+                if occupancy_grid_value != FREE_LEARNING_INDEX:
+                    break
+                else:
+                    voxel_free_count[vox_tuple] += 1
 
     # build state mask
     voxel_state = np.full(spatial_shape, NOT_OBS, int)
@@ -969,7 +975,9 @@ def visibility_kernel(
         voxel_free_count_out_gpu,  # (Dx,Dy,Dz) for writing (int32)
         voxel_label_out_gpu,  # (Dx,Dy,Dz) for writing (int32)
         FREE_LABEL_CONST_FOR_INIT_INT32,  # Scalar (int32, e.g. -1)
-        EPS_CONST, DISTANCE_CONST  # Scalars (float64)
+        EPS_CONST, DISTANCE_CONST,  # Scalars (float64)
+        points_sensor_indices_gpu,
+        sensor_max_ranges_gpu
 ):
     i = cuda.grid(1)
     if i >= points_gpu.shape[0]:
@@ -1001,18 +1009,28 @@ def visibility_kernel(
         cuda.atomic.add(voxel_occ_count_out_gpu, (actual_hit_vx, actual_hit_vy, actual_hit_vz), 1)
         voxel_label_out_gpu[actual_hit_vx, actual_hit_vy, actual_hit_vz] = point_label  # Direct write (last wins)
 
+    sensor_idx_of_point = points_sensor_indices_gpu[i]
+    max_range_for_this_sensor = sensor_max_ranges_gpu[sensor_idx_of_point]
+
+    # Calculate squared distance to avoid sqrt in kernel if possible, or just use norm if math.sqrt is acceptable
+    dx = ray_end_x - ray_start_x
+    dy = ray_end_y - ray_start_y
+    dz = ray_end_z - ray_start_z
+    distance_sq_to_hit = dx * dx + dy * dy + dz * dz
+
     # --- 2. Perform Ray Casting ---
-    _ray_casting_gpu_step_logic(
-        ray_start_x, ray_start_y, ray_start_z,
-        ray_end_x, ray_end_y, ray_end_z,
-        pc_min_x, pc_min_y, pc_min_z,
-        voxel_sx, voxel_sy, voxel_sz,
-        grid_dx, grid_dy, grid_dz,
-        occupancy_grid_gpu,
-        FREE_LEARNING_INDEX_CONST_UINT8,  # Pass the constant for comparison
-        voxel_free_count_out_gpu,
-        EPS_CONST, DISTANCE_CONST
-    )
+    if distance_sq_to_hit <= max_range_for_this_sensor * max_range_for_this_sensor:
+        _ray_casting_gpu_step_logic(
+            ray_start_x, ray_start_y, ray_start_z,
+            ray_end_x, ray_end_y, ray_end_z,
+            pc_min_x, pc_min_y, pc_min_z,
+            voxel_sx, voxel_sy, voxel_sz,
+            grid_dx, grid_dy, grid_dz,
+            occupancy_grid_gpu,
+            FREE_LEARNING_INDEX_CONST_UINT8,  # Pass the constant for comparison
+            voxel_free_count_out_gpu,
+            EPS_CONST, DISTANCE_CONST
+        )
 
 
 # --- Host Function to Manage GPU Execution ---
@@ -1023,7 +1041,9 @@ def calculate_lidar_visibility_gpu_host(
         spatial_shape_cpu_list,  # Original list [Dx,Dy,Dz]
         occupancy_grid_cpu,  # (Dx,Dy,Dz) np.uint8
         FREE_LEARNING_INDEX_cpu,  # scalar int/uint8 for free space semantic label
-        FREE_LABEL_placeholder_cpu  # scalar int (e.g., -1 for internal init)
+        FREE_LABEL_placeholder_cpu,  # scalar int (e.g., -1 for internal init)
+        points_sensor_indices_cpu: np.ndarray,
+        sensor_max_ranges_cpu: np.ndarray
 ):
     num_points = points_cpu.shape[0]
     if num_points == 0:
@@ -1041,6 +1061,10 @@ def calculate_lidar_visibility_gpu_host(
     spatial_shape_gpu_data = cuda.to_device(np.array(spatial_shape_cpu_list, dtype=np.int32))
 
     occupancy_grid_gpu_data = cuda.to_device(np.ascontiguousarray(occupancy_grid_cpu, dtype=np.uint8))
+
+    points_sensor_indices_gpu_data = cuda.to_device(
+        np.ascontiguousarray(points_sensor_indices_cpu, dtype=np.int32))
+    sensor_max_ranges_gpu_data = cuda.to_device(np.ascontiguousarray(sensor_max_ranges_cpu, dtype=np.float32))
 
     # Output arrays on GPU
     voxel_occ_count_gpu = cuda.to_device(np.zeros(tuple(spatial_shape_cpu_list), dtype=np.int32))
@@ -1063,7 +1087,9 @@ def calculate_lidar_visibility_gpu_host(
         np.uint8(FREE_LEARNING_INDEX_cpu),  # Pass as uint8 for comparison with occupancy_grid_gpu
         voxel_occ_count_gpu, voxel_free_count_gpu, voxel_label_out_gpu,
         np.int32(FREE_LABEL_placeholder_cpu),  # For initializing voxel_label_out_gpu
-        EPS_CONST_val, DISTANCE_CONST_val
+        EPS_CONST_val, DISTANCE_CONST_val,
+        points_sensor_indices_gpu_data,
+        sensor_max_ranges_gpu_data
     )
     cuda.synchronize()
 
@@ -1153,9 +1179,7 @@ def calculate_camera_visibility_cpu(
         voxel_size_params: np.ndarray,  # [vx,vy,vz]
         spatial_shape_params: np.ndarray,  # [Dx,Dy,Dz]
         camera_names: List[str],  # List of camera sensor names to use
-        DEPTH_MAX: float = 60.0,
-        # Max depth for camera rays (Occ3D uses 1e3, but 60-80m is more practical for typical scenes)
-        FREE_LEARNING_INDEX: int = 17  # Semantic index for free space
+        DEPTH_MAX: float = 100.0
 ):
     print("Calculating Camera Visibility (CPU)...")
 
@@ -1208,9 +1232,7 @@ def calculate_camera_visibility_cpu(
 
         # Iterate through each pixel ray for this camera
         num_pixel_rays = far_points_ego.shape[0]
-        for ray_idx in range(num_pixel_rays):  # Can be slow, consider downsampling pixels for speed if needed
-            if ray_idx % (num_pixel_rays // 10) == 0 and num_pixel_rays > 10:  # Progress update
-                print(f"  Camera {cam_name}: Processing ray {ray_idx}/{num_pixel_rays}")
+        for ray_idx in tqdm(range(num_pixel_rays), desc=f" Rays for {cam_name}", leave=False):
 
             ray_start_ego = cam_origin_ego
             ray_end_ego = far_points_ego[ray_idx]
@@ -1227,32 +1249,21 @@ def calculate_camera_visibility_cpu(
             ):
                 # vox_tuple is (vx, vy, vz)
                 # Check bounds (ray_casting should handle this, but an extra check is safe)
-                if not (0 <= vox_tuple[0] < spatial_shape_params[0] and \
-                        0 <= vox_tuple[1] < spatial_shape_params[1] and \
+                if not (0 <= vox_tuple[0] < spatial_shape_params[0] and
+                        0 <= vox_tuple[1] < spatial_shape_params[1] and
                         0 <= vox_tuple[2] < spatial_shape_params[2]):
                     continue
 
                 lidar_state_at_vox = lidar_voxel_state[vox_tuple]
 
                 if lidar_state_at_vox == STATE_OCCUPIED:
-                    camera_visibility_mask[vox_tuple] = 1  # Observed by camera, was occupied by LiDAR
+                    camera_visibility_mask[vox_tuple] = STATE_OCCUPIED  # Observed by camera, was occupied by LiDAR
                     break  # Ray is blocked by a LiDAR-occupied voxel
                 elif lidar_state_at_vox == STATE_FREE:
-                    camera_visibility_mask[vox_tuple] = 1  # Observed by camera, was free by LiDAR
+                    camera_visibility_mask[vox_tuple] = STATE_FREE  # Observed by camera, was free by LiDAR
                     # Ray continues through free space
-                elif lidar_state_at_vox == STATE_UNOBSERVED:
-                    # If LiDAR didn't observe it, camera doesn't count it as observed for joint evaluation
-                    # camera_visibility_mask[vox_tuple] remains 0.
-                    # Crucially, does this unobserved voxel block the camera ray for things behind it?
-                    # For Occ3D, if LiDAR says unobserved, it's effectively transparent for camera visibility calc
-                    # in terms of joint evaluation. The ray *continues* to see if it hits something
-                    # further that *was* observed by LiDAR.
-                    # However, the paper's Figure 3a implies "unobserved" can be due to occlusion.
-                    # The text "evaluation is only performed on the 'observed' voxels in both the LiDAR and camera views"
-                    # is key. If a voxel is unobserved by LiDAR, it won't be in the "both" set.
-                    # So, we only mark camera_observed=1 if LiDAR also observed it (as FREE or OCCUPIED).
-                    # The ray should continue to see if it hits something further that LiDAR saw.
-                    pass  # Do nothing, let it remain 0 unless a later voxel on this ray is LiDAR-observed.
+                else:
+                    camera_visibility_mask[vox_tuple] = STATE_UNOBSERVED
 
     print("Finished Camera Visibility (CPU).")
     return camera_visibility_mask
@@ -1355,17 +1366,18 @@ def _camera_ray_trace_and_update_mask_device(
         lidar_state_at_vox = lidar_voxel_state_gpu[cur_vox_ix, cur_vox_iy, cur_vox_iz]
 
         if lidar_state_at_vox == STATE_OCCUPIED_CONST:
-            camera_visibility_mask_gpu[cur_vox_ix, cur_vox_iy, cur_vox_iz] = 1  # Mark as camera-observed
+            # Write STATE_OCCUPIED to the camera mask
+            camera_visibility_mask_gpu[cur_vox_ix, cur_vox_iy, cur_vox_iz] = STATE_OCCUPIED_CONST
             return  # Ray is blocked
         elif lidar_state_at_vox == STATE_FREE_CONST:
-            camera_visibility_mask_gpu[cur_vox_ix, cur_vox_iy, cur_vox_iz] = 1  # Mark as camera-observed
+            camera_visibility_mask_gpu[cur_vox_ix, cur_vox_iy, cur_vox_iz] = STATE_FREE_CONST
             # Ray continues through this free voxel
         elif lidar_state_at_vox == STATE_UNOBSERVED_CONST:
             # Voxel is unobserved by LiDAR. For Occ3D compatibility, this means
             # it's not considered "observed" in the joint camera-LiDAR sense.
             # The camera ray itself might physically continue, but we stop marking
             # voxels as camera-visible along this path if it enters LiDAR-unobserved space.
-            # camera_visibility_mask_gpu[cur_vox_ix, cur_vox_iy, cur_vox_iz] remains 0.
+            camera_visibility_mask_gpu[cur_vox_ix, cur_vox_iy, cur_vox_iz] = STATE_UNOBSERVED_CONST
             return  # Stop considering this ray for camera visibility updates
 
         # Termination condition: check if we've effectively reached the ray_end
@@ -1461,15 +1473,11 @@ def calculate_camera_visibility_gpu_host(
         voxel_size_cpu_scalar: float,
         spatial_shape_cpu_list: list,  # [Dx,Dy,Dz]
         camera_names: List[str],
-        DEPTH_MAX_val: float = 60.0,
-        # FREE_LEARNING_INDEX_cpu is not directly used by this mask generation,
-        # but good to have if semantic assignment was part of it.
-        # The mask is binary 0 or 1.
+        DEPTH_MAX_val: float = 100.0
 ):
     print("Calculating Camera Visibility (GPU)...")
 
     spatial_shape_tuple = tuple(spatial_shape_cpu_list)
-    camera_visibility_mask_cpu = np.zeros(spatial_shape_tuple, dtype=np.uint8)  # Final output on CPU
 
     # Transfer common data to GPU once
     lidar_voxel_state_gpu = cuda.to_device(np.ascontiguousarray(lidar_voxel_state_cpu, dtype=np.uint8))
@@ -1478,7 +1486,9 @@ def calculate_camera_visibility_gpu_host(
     spatial_shape_gpu_dims = cuda.to_device(np.array(spatial_shape_cpu_list, dtype=np.int32))
 
     # Output mask on GPU, initialized to 0
-    camera_visibility_mask_gpu = cuda.to_device(np.zeros(spatial_shape_tuple, dtype=np.uint8))
+    camera_visibility_mask_gpu = cuda.to_device(
+        np.full(spatial_shape_tuple, STATE_UNOBSERVED, dtype=np.uint8)  # Explicit initialization
+    )
 
     current_sample_rec = trucksc.get('sample', current_sample_token)
     current_ego_pose_ts = current_sample_rec['timestamp']
@@ -1550,8 +1560,7 @@ def calculate_camera_visibility_gpu_host(
 
 def visualize_occupancy_o3d(voxel_state, voxel_label, pc_range, voxel_size,
                             class_color_map, default_color,
-                            show_semantics=False, show_free=False, show_unobserved=False,
-                            point_size=2.0):
+                            show_semantics=False, show_free=False, show_unobserved=False):
     """
     Visualizes occupancy grid using Open3D.
 
@@ -1566,7 +1575,6 @@ def visualize_occupancy_o3d(voxel_state, voxel_label, pc_range, voxel_size,
                                Otherwise, occupied voxels are red.
         show_free (bool): If True, visualize free voxels (colored light blue).
         show_unobserved (bool): If True, visualize unobserved voxels (colored gray).
-        point_size (float): Size of the points in the Open3D visualizer.
     """
     geometries = []
 
@@ -1634,10 +1642,6 @@ def visualize_occupancy_o3d(voxel_state, voxel_label, pc_range, voxel_size,
     vis.create_window(window_name='Occupancy Grid (Open3D)')
     for geom in geometries:
         vis.add_geometry(geom)
-
-    """opt = vis.get_render_option()
-    opt.point_size = point_size  # Adjust point size
-    opt.background_color = np.asarray([0.1, 0.1, 0.1])  # Dark background"""
 
     vis.run()
     vis.destroy_window()
@@ -1735,6 +1739,15 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     # sensors = ['LIDAR_LEFT', 'LIDAR_RIGHT']
     sensors = config['sensors']
     print(f"Lidar sensors: {sensors}")
+    sensors_max_range_list = []
+    for sensor in sensors:
+        if sensor in ['LIDAR_LEFT', 'LIDAR_RIGHT']:
+            sensors_max_range_list.append(200)
+        if sensor in ['LIDAR_TOP_FRONT', 'LIDAR_TOP_LEFT', 'LIDAR_TOP_RIGHT', 'LIDAR_REAR']:
+            sensors_max_range_list.append(35)
+    print(f"Lidar sensors max range: {sensors_max_range_list}")
+    sensor_max_ranges_arr = np.array(sensors_max_range_list, dtype=np.float64)
+
     cameras = config['cameras']
     print(f"Cameras: {cameras}")
 
@@ -2303,6 +2316,16 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
     print(f"Lidar timestamps: {lidar_timestamps}")
 
+    ######################### Process ego_ref_from_ego_i for kissicp #############################
+    if not dict_list:
+        print("dict_list is empty. Cannot proceed with pose comparison.")
+    else:
+        gt_relative_poses_list = [fd['ego_ref_from_ego_i'] for fd in dict_list]
+        gt_relative_poses_arr = np.array(gt_relative_poses_list)  # Shape: (num_frames, 4, 4)
+        print(f"Collected {gt_relative_poses_arr.shape[0]} GT relative poses for comparison.")
+
+    ##############################################################################################
+
     poses_kiss_icp = None
     ###############################################################################################
     ################# Refinement using KISS-ICP ###################################################
@@ -2404,7 +2427,136 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
                 refined_lidar_pc_with_semantic_list.append(points_transformed)
 
-    # Determine the source lists for aggregation based on ICP refinement
+        # --- 4. Compare KISS-ICP Poses with Ground Truth ---
+        if 'gt_relative_poses_arr' in locals() and gt_relative_poses_arr.shape[0] > 0:  # Check if GT poses were loaded
+            if poses_kiss_icp.shape[0] == gt_relative_poses_arr.shape[0]:
+                print("\n--- Comparing KISS-ICP Poses with Ground Truth Poses ---")
+                trans_errors = []
+                rot_errors_rad = []  # Store rotational errors in radians
+                trans_errors_x = []
+                trans_errors_y = []
+                trans_errors_z = []
+
+                kiss_relative_poses_arr = poses_kiss_icp
+
+                for k_idx in range(kiss_relative_poses_arr.shape[0]):
+                    pose_kiss_k = kiss_relative_poses_arr[k_idx]  # Pose of frame k in KISS-ICP's frame 0 system
+                    pose_gt_k = gt_relative_poses_arr[k_idx]  # Pose of frame k in dataset's frame 0 system
+
+                    # Translational error
+                    t_kiss = pose_kiss_k[:3, 3]
+                    t_gt = pose_gt_k[:3, 3]
+
+                    # Translational error vector (GT - Estimated)
+                    t_error_vec = t_gt - t_kiss
+                    trans_errors_x.append(t_error_vec[0])
+                    trans_errors_y.append(t_error_vec[1])
+                    trans_errors_z.append(t_error_vec[2])
+
+                    # Overall translational error
+                    trans_error = np.linalg.norm(t_error_vec)  # Same as np.linalg.norm(t_gt - t_kiss)
+                    trans_errors.append(trans_error)
+
+                    # Rotational error
+                    R_kiss = pose_kiss_k[:3, :3]
+                    R_gt = pose_gt_k[:3, :3]
+
+                    # Relative rotation: R_error = inv(R_kiss) @ R_gt
+                    # or R_error = R_gt @ R_kiss.T (if R_kiss is orthogonal, its transpose is its inverse)
+                    R_error = R_kiss.T @ R_gt
+
+                    # Angle from rotation matrix trace
+                    # angle = arccos((trace(R_error) - 1) / 2)
+                    trace_val = np.trace(R_error)
+                    # Clip to avoid domain errors with arccos due to numerical inaccuracies for values slightly outside [-1, 1]
+                    clipped_arg = np.clip((trace_val - 1.0) / 2.0, -1.0, 1.0)
+                    rot_error_rad = np.arccos(clipped_arg)
+                    rot_errors_rad.append(rot_error_rad)
+
+                avg_trans_error = np.mean(trans_errors)
+                median_trans_error = np.median(trans_errors)
+                avg_rot_error_deg = np.mean(np.degrees(rot_errors_rad))
+                median_rot_error_deg = np.median(np.degrees(rot_errors_rad))
+
+                # Calculate statistics for component-wise errors
+                mae_trans_error_x = np.mean(np.abs(trans_errors_x))
+                mae_trans_error_y = np.mean(np.abs(trans_errors_y))
+                mae_trans_error_z = np.mean(np.abs(trans_errors_z))
+
+                mean_trans_error_x = np.mean(trans_errors_x)  # To see bias
+                mean_trans_error_y = np.mean(trans_errors_y)  # To see bias
+                mean_trans_error_z = np.mean(trans_errors_z)  # To see bias
+
+                print(f"Sequence: {scene_name}")
+                print(f"  Average Translational Error : {avg_trans_error:.4f} m")
+                print(f"  Median Translational Error  : {median_trans_error:.4f} m")
+                print(f"  Average Rotational Error    : {avg_rot_error_deg:.4f} degrees")
+                print(f"  Median Rotational Error     : {median_rot_error_deg:.4f} degrees")
+                print(f"  MAE X: {mae_trans_error_x:.4f} m (Mean X Bias: {mean_trans_error_x:+.4f} m)")
+                print(f"  MAE Y: {mae_trans_error_y:.4f} m (Mean Y Bias: {mean_trans_error_y:+.4f} m)")
+                print(f"  MAE Z: {mae_trans_error_z:.4f} m (Mean Z Bias: {mean_trans_error_z:+.4f} m)")
+
+                # Plotting (updated to 2x2 layout)
+                fig, axs = plt.subplots(2, 2, figsize=(17, 10))  # Adjusted figsize for 2x2
+                fig.suptitle(f'Scene {scene_name}: KISS-ICP vs GT Relative Pose Errors', fontsize=16)
+
+                # Top-left: Overall Translational Error
+                axs[0, 0].plot(trans_errors, label="Overall Trans. Error")
+                axs[0, 0].set_title('Overall Translational Error')
+                axs[0, 0].set_ylabel('Error (m)')
+                axs[0, 0].grid(True)
+                axs[0, 0].legend()
+                axs[0, 0].set_xlabel('Frame Index')
+
+                # Top-right: Overall Rotational Error
+                axs[0, 1].plot(np.degrees(rot_errors_rad), label="Overall Rot. Error")
+                axs[0, 1].set_title('Overall Rotational Error')
+                axs[0, 1].set_ylabel('Error (degrees)')
+                axs[0, 1].grid(True)
+                axs[0, 1].legend()
+                axs[0, 1].set_xlabel('Frame Index')
+
+                # Bottom-left: X and Y Translational Errors
+                axs[1, 0].plot(trans_errors_x, label="X Error (GT - Est)", alpha=0.9)
+                axs[1, 0].plot(trans_errors_y, label="Y Error (GT - Est)", alpha=0.9)
+                axs[1, 0].axhline(0, color='black', linestyle='--', linewidth=0.7, label="Zero Error")
+                axs[1, 0].set_title('X & Y Translational Component Errors')
+                axs[1, 0].set_xlabel('Frame Index')
+                axs[1, 0].set_ylabel('Error (m)')
+                axs[1, 0].grid(True)
+                axs[1, 0].legend()
+
+                # Bottom-right: Z Translational Error
+                axs[1, 1].plot(trans_errors_z, label="Z Error (GT - Est)")
+                axs[1, 1].axhline(0, color='black', linestyle='--', linewidth=0.7, label="Zero Error")
+                axs[1, 1].set_title('Z Translational Component Error')
+                axs[1, 1].set_xlabel('Frame Index')
+                axs[1, 1].set_ylabel('Error (m)')
+                axs[1, 1].grid(True)
+                axs[1, 1].legend()
+
+                plt.tight_layout(rect=[0, 0, 1, 0.95])  # Adjust layout to make space for subtitle
+
+                plot_save_dir = Path(args.save_path) / scene_name / "pose_comparison_plots"
+                plot_save_dir.mkdir(parents=True, exist_ok=True)
+                plot_filename = plot_save_dir / f"errors_scene_{scene_name}.png"
+                plt.savefig(plot_filename)
+                print(f"Saved pose error plot to {plot_filename}")
+
+                if args.pose_error_plot:
+                    plt.show()
+                plt.close(fig)
+
+            else:
+                print(f"Warning: Number of KISS-ICP poses ({poses_kiss_icp.shape[0]}) "
+                      f"does not match GT relative poses ({gt_relative_poses_arr.shape[0]}). Cannot compare.")
+
+        elif not ('gt_relative_poses_arr' in locals() and gt_relative_poses_arr.shape[0] > 0):
+            print("GT relative poses not available for comparison.")
+
+
+
+                    # Determine the source lists for aggregation based on ICP refinement
     if not args.icp_refinement:
         print("ICP refinement is OFF. Using unrefined points (in reference ego frame) for aggregation.")
         # These are lists of (N, D) arrays, already in reference ego frame
@@ -2909,7 +3061,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         if args.vis_static_before_combined_dynamic:
             visualize_pointcloud_bbox(point_cloud.T,
                                       boxes=boxes,
-                                      title=f"Fused static PC before combineding with dynamic points + BBoxes + Ego BBox - Frame {i}",
+                                      title=f"Fused static PC before combining with dynamic points + BBoxes + Ego BBox - Frame {i}",
                                       self_vehicle_range=self_range,
                                       vis_self_vehicle=True)
 
@@ -3213,7 +3365,9 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                     spatial_shape_cpu_list=occ_size,  # Your [Dx,Dy,Dz] list from config
                     occupancy_grid_cpu=occupancy_grid,  # Your pre-computed (Dx,Dy,Dz) aggregated occupancy (uint8)
                     FREE_LEARNING_INDEX_cpu=FREE_LEARNING_INDEX,  # Your semantic index for free space
-                    FREE_LABEL_placeholder_cpu=-1  # The internal placeholder for initializing labels on GPU
+                    FREE_LABEL_placeholder_cpu=-1,  # The internal placeholder for initializing labels on GPU
+                    points_sensor_indices_cpu=scene_semantic_points_sids.astype(np.int32),
+                    sensor_max_ranges_cpu=sensor_max_ranges_arr
                 )
 
                 end_time_gpu = time.perf_counter()
@@ -3226,20 +3380,19 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                 if args.vis_lidar_visibility:
                     voxel_size_for_viz = np.array([voxel_size] * 3)
                     visualize_occupancy_o3d(
-                        voxel_state_gpu,
-                        voxel_label_gpu,  # This is now your final semantic grid
+                        voxel_state=voxel_state_gpu,
+                        voxel_label=voxel_label_gpu,
                         pc_range=pc_range,
                         voxel_size=voxel_size_for_viz,
                         class_color_map=CLASS_COLOR_MAP,  # Make sure this is globally defined
                         default_color=DEFAULT_COLOR,  # Make sure this is globally defined
                         show_semantics=True,
                         show_free=True,
-                        show_unobserved=False,
-                        point_size=5.0
+                        show_unobserved=False
                     )
 
-                run_cpu_comparison = False
-                if run_cpu_comparison:
+                run_cpu_comparison_lidar = True
+                if run_cpu_comparison_lidar:
                     if isinstance(voxel_size, (int, float)):
                         voxel_size_masks = [voxel_size, voxel_size, voxel_size]
 
@@ -3256,6 +3409,8 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                         spatial_shape=occ_size,  # (H,W,Z)
                         occupancy_grid=occupancy_grid,
                         FREE_LEARNING_INDEX=FREE_LEARNING_INDEX,
+                        points_sensor_indices=scene_semantic_points_sids,
+                        sensor_max_ranges=sensor_max_ranges_arr
                     )
 
                     end_time_cpu = time.perf_counter()
@@ -3269,16 +3424,15 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                     if args.vis_lidar_visibility:
                         print("Visualizing with Semantics and Free")
                         visualize_occupancy_o3d(
-                            voxel_state,
-                            voxel_label,
+                            voxel_state=voxel_state,
+                            voxel_label=voxel_label,
                             pc_range=pc_range,
                             voxel_size=voxel_size_masks,  # Pass as array
                             class_color_map=CLASS_COLOR_MAP,
                             default_color=DEFAULT_COLOR,
                             show_semantics=True,
                             show_free=True,
-                            show_unobserved=False,
-                            point_size=5.0
+                            show_unobserved=False
                         )
 
                 occupied_mask = occupancy_grid != FREE_LEARNING_INDEX
@@ -3315,42 +3469,41 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                     voxel_size_cpu_scalar=voxel_size,
                     spatial_shape_cpu_list=occ_size,
                     camera_names=cameras,
-                    DEPTH_MAX_val=config.get('camera_ray_depth_max', 70.0)  # e.g., 70 meters
-                    # FREE_LEARNING_INDEX_cpu is not directly used by mask generation but by get_camera_parameters if needed
+                    DEPTH_MAX_val=config.get('camera_ray_depth_max', 100.0)  # e.g., 70 meters
                 )
+
+                print(f"Camera visibility mask cpu has the shape: {mask_camera.shape}")
 
                 end_time_cam_vis_gpu = time.perf_counter()
                 print(
                     f"GPU Camera visibility calculation took: {end_time_cam_vis_gpu - start_time_cam_vis_gpu:.4f} seconds")
 
-                print("Visualizing GPU Camera Visibility Mask Results...")
-
-                temp_voxel_state_for_cam_viz = np.zeros_like(mask_camera, dtype=np.uint8)
-                temp_voxel_state_for_cam_viz[mask_camera == 1] = STATE_OCCUPIED
-
-                temp_voxel_label_for_cam_viz = np.full_like(mask_camera, FREE_LEARNING_INDEX, dtype=np.uint8)
-
-                temp_voxel_label_for_cam_viz[mask_camera == 1] = voxel_label_gpu[
-                    mask_camera == 1]
+                mask_camera_binary = np.zeros_like(mask_camera, dtype=np.uint8)
+                mask_camera_binary[mask_camera == STATE_OCCUPIED] = 1
+                mask_camera_binary[mask_camera == STATE_FREE] = 1
 
                 if args.vis_camera_visibility:
+                    print("Visualizing GPU Camera Visibility Mask Results...")
+
+                    temp_voxel_state_for_cam_viz = mask_camera.copy()
+
                     voxel_size_arr_viz = np.array([voxel_size] * 3) if isinstance(voxel_size, (int, float)) else np.array(
                         voxel_size)
 
                     visualize_occupancy_o3d(
                         voxel_state=temp_voxel_state_for_cam_viz,
-                        voxel_label=temp_voxel_label_for_cam_viz,
+                        voxel_label=voxel_label_gpu,
                         pc_range=pc_range,
                         voxel_size=voxel_size_arr_viz,
                         class_color_map=CLASS_COLOR_MAP,
                         default_color=DEFAULT_COLOR,
                         show_semantics=True,  # Show semantics of camera-visible regions
-                        show_free=False,  # Not showing LiDAR-free for this specific mask viz
-                        show_unobserved=False,  # Shows what's NOT camera visible as unobserved
-                        point_size=3.0
+                        show_free=True,  # Not showing LiDAR-free for this specific mask viz
+                        show_unobserved=False  # Shows what's NOT camera visible as unobserved
                     )
 
-                if run_cpu_comparison:
+                run_cpu_comparison_camera = True
+                if run_cpu_comparison_camera:
                     print(f"Calculating camera visibility for cameras (CPU): {cameras}")
 
                     # Ensure voxel_size and occ_size are passed as numpy arrays if the function expects them
@@ -3367,32 +3520,36 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                         voxel_size_params=voxel_size_arr,
                         spatial_shape_params=occ_size_arr,
                         camera_names=cameras,
-                        DEPTH_MAX=config.get('camera_ray_depth_max', 70.0),  # Make it configurable
-                        FREE_LEARNING_INDEX=FREE_LEARNING_INDEX
+                        DEPTH_MAX=config.get('camera_ray_depth_max', 100.0)  # Make it configurable
                     )
+                    print(f"Camera visibility mask cpu has the shape: {mask_camera.shape}")
+
                     end_time_cam_vis = time.perf_counter()
                     print(f"CPU Camera visibility calculation took: {end_time_cam_vis - start_time_cam_vis:.4f} seconds")
 
-                    print("Visualizing Camera Visibility Mask Results...")
-                    temp_voxel_state_for_cam_viz = np.zeros_like(mask_camera, dtype=np.uint8)
-                    temp_voxel_state_for_cam_viz[mask_camera == 1] = STATE_OCCUPIED
-
-                    # Create dummy labels or use a uniform color for visualization
-                    temp_voxel_label_for_cam_viz = np.full_like(mask_camera, FREE_LEARNING_INDEX, dtype=np.uint8)
+                    mask_camera_binary = np.zeros_like(mask_camera, dtype=np.uint8)
+                    mask_camera_binary[mask_camera == STATE_OCCUPIED] = 1
+                    mask_camera_binary[mask_camera == STATE_FREE] = 1
 
                     if args.vis_camera_visibility:
+
+                        print("Visualizing Camera Visibility Mask Results...")
+                        temp_voxel_state_for_cam_viz = mask_camera.copy()
+
+                        voxel_size_arr_viz = np.array([voxel_size] * 3) if isinstance(voxel_size,
+                                                                                      (int, float)) else np.array(
+                            voxel_size)
+
                         visualize_occupancy_o3d(
-                            temp_voxel_state_for_cam_viz,
-                            temp_voxel_label_for_cam_viz,  # Using dummy/uniform labels for camera mask
+                            voxel_state=temp_voxel_state_for_cam_viz,
+                            voxel_label=voxel_label_gpu,
                             pc_range=pc_range,
-                            voxel_size=voxel_size_arr,
+                            voxel_size=voxel_size_arr_viz,
                             class_color_map=CLASS_COLOR_MAP,
                             default_color=DEFAULT_COLOR,
-                            show_semantics=False,  # Set to False to use a uniform color (red by default for STATE_OCCUPIED)
-                            # or True if you populated temp_voxel_label_for_cam_viz with actual semantics
-                            show_free=False,  # Not showing free for this specific mask viz
-                            show_unobserved=True,  # Shows what's NOT camera visible as unobserved
-                            point_size=3.0
+                            show_semantics=True,  # Show semantics of camera-visible regions
+                            show_free=True,  # Not showing LiDAR-free for this specific mask viz
+                            show_unobserved=False  # Shows what's NOT camera visible as unobserved
                         )
 
         print(
@@ -3405,7 +3562,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         # Create the binary mask_lidar (0 for unobserved, 1 for observed)
         # Observed means either FREE or OCCUPIED.
         mask_lidar_to_save = (final_voxel_state_to_save != STATE_UNOBSERVED).astype(np.uint8)
-        mask_camera_to_save = mask_camera
+        mask_camera_to_save = mask_camera_binary
 
         ##########################################save like Occ3D #######################################
         # Save as .npz
@@ -3483,6 +3640,7 @@ if __name__ == '__main__':
 
     ####################### Kiss-ICP refinement ##########################################
     parse.add_argument('--icp_refinement', action='store_true', help='Enable ICP refinement')
+    parse.add_argument('--pose_error_plot', action='store_true', help='Plot pose error')
 
     ####################### Meshing #####################################################
     parse.add_argument('--meshing', action='store_true', help='Enable meshing')
