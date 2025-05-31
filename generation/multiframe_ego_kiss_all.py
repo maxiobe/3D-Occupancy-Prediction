@@ -2336,13 +2336,16 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         in_memory_dataset = None
         pipeline = None
         estimated_poses_kiss = None  # Will hold the results from pipeline.poses
+        log_dir_kiss = osp.join(save_path, scene_name, "kiss_icp_logs")
 
         try:
             in_memory_dataset = InMemoryDataset(
                 lidar_scans=raw_pc_list,
+                gt_relative_poses=gt_relative_poses_arr,
                 timestamps=lidar_timestamps,
                 # Use a descriptive sequence ID, incorporating scene name if possible
-                sequence_id=f"{scene_name}_icp_run"
+                sequence_id=f"{scene_name}_icp_run",
+                log_dir=log_dir_kiss
             )
             print(f"Created InMemoryDataset with {len(in_memory_dataset)} scans.")
 
@@ -2537,7 +2540,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
                 plt.tight_layout(rect=[0, 0, 1, 0.95])  # Adjust layout to make space for subtitle
 
-                plot_save_dir = Path(args.save_path) / scene_name / "pose_comparison_plots"
+                plot_save_dir = Path(args.save_path) / scene_name / "kiss_icp_logs"
                 plot_save_dir.mkdir(parents=True, exist_ok=True)
                 plot_filename = plot_save_dir / f"errors_scene_{scene_name}.png"
                 plt.savefig(plot_filename)

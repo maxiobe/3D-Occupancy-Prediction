@@ -9,7 +9,7 @@ class InMemoryDataset:
     """
     A custom dataset class for KISS-ICP that uses lidar scans already loaded into memory.
     """
-    def __init__(self, lidar_scans, timestamps=None, sequence_id="in_memory_seq"):
+    def __init__(self, lidar_scans, gt_relative_poses, timestamps=None, initial_guess=True, sequence_id="in_memory_seq", log_dir="."):
         """
         Initializes the dataset.
 
@@ -38,10 +38,11 @@ class InMemoryDataset:
         # Provide a sequence ID for output file naming
         self.sequence_id = sequence_id
         # Add a dummy data_dir attribute, as OdometryPipeline might check for it
-        self.data_dir = "."
+        self.log_dir = log_dir
         # Indicate no ground truth poses are available
         # (OdometryPipeline checks using hasattr, so not defining it works too)
-        # self.has_gt = False # Or just don't define gt_poses
+        self.gt_poses = gt_relative_poses
+        self.initial_guess = initial_guess
 
     def __len__(self):
         """Returns the number of scans in the dataset."""
@@ -122,7 +123,3 @@ class InMemoryDataset:
         # OdometryPipeline handles slicing itself based on jump/n_scans,
         # so we return the full list of timestamps corresponding to self.scans
         return np.array(self.timestamps, dtype=np.float64)
-
-    # --- Methods/Attributes NOT needed for basic operation ---
-    # def apply_calibration(self, poses): return poses # Only if calibration needed
-    # gt_poses = None # Only if evaluation against ground truth needed
