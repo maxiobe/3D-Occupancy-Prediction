@@ -1,9 +1,5 @@
 import numpy as np
-from pathlib import Path # Good practice for paths, though less critical here
-# Import OdometryPipeline if not already imported
-from kiss_icp.pipeline import OdometryPipeline
-# Import load_config if you haven't loaded it some other way
-from kiss_icp.config import load_config
+from typing import List
 
 class InMemoryDataset:
     """
@@ -123,3 +119,105 @@ class InMemoryDataset:
         # OdometryPipeline handles slicing itself based on jump/n_scans,
         # so we return the full list of timestamps corresponding to self.scans
         return np.array(self.timestamps, dtype=np.float64)
+
+class InMemoryDatasetMapMOS:
+    """
+    A custom dataset class for MapMOS that uses lidar scans, timestamps,
+    and labels already loaded into memory.
+    """
+
+    def __init__(self,
+                 lidar_scans: list,  # List of NxFeatures NumPy arrays
+                 # Per-scan timestamps are crucial for MapMOS's 4D convolutions
+                 scan_timestamps: list,  # List of floats (one per scan)
+                 # Labels for segmentation (0 for static, 1 for moving)
+                 labels_per_scan: list,  # List of Nx1 NumPy arrays (int32)
+                 sequence_id: str = "in_memory_mapmos_seq",
+                 # gt_poses are not directly used by __getitem__ for MapMOS in the
+                 # same way as TruckScenesDataset, but good to have for context/evaluation later.
+                 gt_global_poses: list = None  # Optional: List of 4x4 global poses
+                 ):
+
+        if not (len(lidar_scans) == len(scan_timestamps) == len(labels_per_scan)):
+            raise ValueError(
+                "Input lists (lidar_scans, scan_timestamps, labels_per_scan) must have the same length.")
+        if gt_global_poses is not None and len(lidar_scans) != len(gt_global_poses):
+            raise ValueError("If gt_global_poses is provided, it must match the length of lidar_scans.")
+        if not lidar_scans:
+            raise ValueError("Input lists cannot be empty.")
+
+        self.scans = lidar_scans
+        self.scan_timestamps_data = [float(t) for t in scan_timestamps]  # Ensure float
+        self.labels_data = labels_per_scan  # This is your list of label arrays
+        self.gt_global_poses_data = gt_global_poses
+
+        self.sequence_id = sequence_id
+        # Add other attributes MapMOSPipeline might expect from a dataset object
+        # self.log_dir = log_dir # If needed by the pipeline for saving outputs
+
+    def __len__(self):
+        """Returns the number of scans in the dataset."""
+        return len(self.scans)
+
+    def __getitem__(self, index):
+        """
+        Returns the points, per-point timestamps (typically zeros for MapMOS like in TruckScenesDataset),
+        and labels for the given index.
+
+        Args:
+            index (int): The index of the scan to retrieve.
+
+        Returns:
+            tuple: (points, timestamps_for_points, labels)
+                   points: NumPy array (Nx3), float64.
+                   timestamps_for_points: NumPy array (N,), float64. MapMOS itself will
+                                         likely use the per-scan timestamp (self.scan_timestamps_data[index])
+                                         to create the 4th dimension for its convolutions.
+                                         The original TruckScenesDataset returned np.zeros here.
+                   labels: NumPy array (Nx1), int32.
+        """
+        if not 0 <= index < len(self.scans):
+            raise IndexError(f"Index {index} is out of range for {len(self.scans)} scans.")
+
+        # --- Point Cloud ---
+        points_raw = self.scans[index]
+        if points_raw.ndim != 2 or points_raw.shape[1] < 3:
+            # If your raw_pc_list stores (Features, N), then transpose
+            if points_raw.ndim == 2 and points_raw.shape[0] >= 3 and points_raw.shape[0] < points_raw.shape[
+                1]:  # Heuristic for (F,N)
+                points_raw = points_raw.T  # Now (N, F)
+            else:
+                raise ValueError(
+                    f"Scan at index {index} (shape {points_raw.shape}) is not a valid 2D numpy array with at least 3 features (expected NxD).")
+
+        points = points_raw[:, :3].astype(np.float64)  # Extract XYZ, ensure float64
+
+        # --- Timestamps for points ---
+        # Mimicking TruckScenesDataset which returns zeros here.
+        # MapMOS likely uses the per-scan timestamp (self.scan_timestamps_data[index])
+        # when constructing its 4D input tensor.
+        timestamps_for_points = np.zeros(len(points), dtype=np.float64)
+
+        # --- Labels ---
+        labels = self.labels_data[index]  # Should be (N, 1) int32
+        if not isinstance(labels, np.ndarray) or labels.ndim != 2 or labels.shape[1] != 1:
+            raise ValueError(
+                f"Labels at index {index} (shape {labels.shape}) must be a 2D NumPy array with shape (N, 1).")
+        if labels.shape[0] != points.shape[0]:
+            raise ValueError(
+                f"Mismatch in number of points ({points.shape[0]}) and labels ({labels.shape[0]}) at index {index}.")
+        labels = labels.astype(np.int32)
+
+        return points, timestamps_for_points, labels
+
+    # --- Other methods potentially useful or expected by the pipeline ---
+    @property
+    def timestamps(self) -> List[float]:  # Matches kiss_icp InMemoryDataset
+        """Returns the list of per-scan timestamps."""
+        return self.scan_timestamps_data
+
+    # If MapMOS needs access to ground truth poses (e.g., for evaluation or if it doesn't run odometry)
+    # The MapMOS paper mentions using KISS-ICP for odometry, so it might not need GT poses
+    # from the dataset object for its core processing.
+    # def get_gt_poses(self) -> list: # Or np.ndarray
+    #    return self.gt_global_poses_data
