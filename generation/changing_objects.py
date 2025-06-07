@@ -320,6 +320,7 @@ def track_box_dimensions(trucksc: 'TruckScenes', scene_index: int = 0, precision
 
         if not boxes:
             # Move to the next sample if no boxes found
+            print("No boxes found. Continuing...")
             current_sample_token = my_sample.get('next', '')
             continue
 
@@ -346,7 +347,7 @@ def track_box_dimensions(trucksc: 'TruckScenes', scene_index: int = 0, precision
         # Move to the next sample
         current_sample_token = my_sample.get('next', '')
         if not current_sample_token:
-             # print(f"Processed {sample_count} samples. Reached end of scene '{scene_name}'.") # Optional: end of scene message
+             print(f"Processed {sample_count} samples. Reached end of scene '{scene_name}'.") # Optional: end of scene message
              break # Explicit break
 
     # --- Analysis ---
@@ -390,6 +391,8 @@ def track_box_dimensions(trucksc: 'TruckScenes', scene_index: int = 0, precision
     print(f"Instances with changing dimensions:     {changed_count}")
     print(f"Instances with constant dimensions:   {constant_count}")
     print("---------------\n")
+
+    return changed_count
 
 
 def get_images(trucksc, my_sample, sensor):
@@ -507,7 +510,14 @@ if __name__ == '__main__':
     truckscenes = TruckScenes(version='v1.0-trainval',
                               dataroot='/home/max/ssd/Masterarbeit/TruckScenes/trainval/v1.0-trainval',
                               verbose=True)
-    for i in range(0, 50):
-        track_box_dimensions(trucksc=truckscenes, scene_index=i)
+    changed_count = 0
+    changed_scenes_list = []
+    for i in range(0, 597):
+        changed_count = track_box_dimensions(trucksc=truckscenes, scene_index=i)
+        if changed_count:
+            changed_scenes_list.append(i)
 
-    main(truckscenes)
+    print(f"Changed {len(changed_scenes_list)} scenes.")
+    print("Changed object size in scene:", changed_scenes_list)
+
+    #main(truckscenes)
