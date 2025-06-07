@@ -1722,6 +1722,55 @@ def transform_boxes_to_ego(boxes, ego_pose_record):
 
     return transformed_boxes
 
+def visualize_mapmos_predictions(points_xyz: np.ndarray,
+                                 predicted_labels: np.ndarray,
+                                 scan_index: int,
+                                 window_title_prefix: str = "MapMOS Prediction"):
+    """
+    Visualizes a point cloud, coloring points based on MapMOS predicted labels.
+
+    Args:
+        points_xyz (np.ndarray): Point cloud array of shape (N, 3) for XYZ coordinates.
+        predicted_labels (np.ndarray): NumPy array of shape (N,) containing predicted labels.
+                                      Assumes: 0=static, 1=dynamic, -1=not classified.
+        scan_index (int): The index of the scan for the window title.
+        window_title_prefix (str): Prefix for the visualization window title.
+    """
+    if points_xyz.shape[0] == 0:
+        print(f"Scan {scan_index}: No points to visualize.")
+        return
+    if points_xyz.shape[0] != predicted_labels.shape[0]:
+        print(
+            f"Scan {scan_index}: Mismatch between number of points ({points_xyz.shape[0]}) and labels ({predicted_labels.shape[0]}). Skipping visualization.")
+        return
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points_xyz[:, :3])
+
+    # Define colors:
+    # Static (label 0) = Blue
+    # Dynamic (label 1) = Red
+    # Not Classified (label -1) = Gray
+
+    colors = np.zeros_like(points_xyz)  # Initialize with black
+
+    static_mask = (predicted_labels == 0)
+    dynamic_mask = (predicted_labels == 1)
+    unclassified_mask = (predicted_labels == -1)
+
+    colors[static_mask] = [0.0, 0.0, 1.0]  # Blue for static
+    colors[dynamic_mask] = [1.0, 0.0, 0.0]  # Red for dynamic
+    colors[unclassified_mask] = [0.5, 0.5, 0.5]  # Gray for not classified/out of range
+
+    pcd.colors = o3d.utility.Vector3dVector(colors)
+
+    print(f"Visualizing Scan Index: {scan_index}")
+    print(f"  Static points (blue): {np.sum(static_mask)}")
+    print(f"  Dynamic points (red): {np.sum(dynamic_mask)}")
+    print(f"  Unclassified points (gray): {np.sum(unclassified_mask)}")
+
+    o3d.visualization.draw_geometries([pcd], window_name=f"{window_title_prefix} - Scan {scan_index}")
+
 
 def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     # Extract necessary parameters from the arguments and configs
@@ -1876,7 +1925,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         if args.filter_raw_pc and args.filter_mode != 'none':
             # 1) prepare
             raw_pts = sensor_fused_pc.points.T # (N, 3+…)
-            raw_sids = sensor_ids_points  # (N,)
+            raw_sids = sensor_ids_points.copy()  # (N,)
             pcd_raw = o3d.geometry.PointCloud()
             pcd_raw.points = o3d.utility.Vector3dVector(raw_pts[:, :3])
 
@@ -1894,7 +1943,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             # Now overwrite your fused_pc & sensor_ids:
             sensor_fused_pc.points = raw_pts.T
             sensor_fused_pc.timestamps = sensor_fused_pc.timestamps[:, kept_raw_idx]
-            sensor_ids_points = raw_sids
+            sensor_ids_points = raw_sids.copy()
 
         assert sensor_fused_pc.points.shape[1] == sensor_ids_points.shape[0], \
             f"point count {sensor_fused_pc.points.shape[1]} vs sensor_ids {sensor_ids_points.shape[0]}"
@@ -1993,7 +2042,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             object_points_mask = points_in_boxes[0][:, j].bool()
             # Extract points using mask to filter points
             object_points = sensor_fused_pc.points.T[object_points_mask]
-            object_points_sensor_ids = sensor_ids_points.T[object_points_mask]
+            object_points_sensor_ids = sensor_ids_points.copy().T[object_points_mask]
             # Store the filtered points, Result is a list of arrays, where each element contains the points belonging to a particular object
             object_points_list.append(object_points)
             objects_points_list_sensor_ids.append(object_points_sensor_ids)
@@ -2023,12 +2072,25 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         inside_z = torch.from_numpy(points_xyz[:, 2] >= z_min_self) & torch.from_numpy(points_xyz[:, 2] <= z_max_self)
 
         inside_ego_mask = inside_x & inside_y & inside_z
+
+        num_ego_points = inside_ego_mask.sum().item()
+        print(f"Number of points on ego vehicle: {num_ego_points}")
+
+        dynamic_mask_mapmos = dynamic_mask | inside_ego_mask
+
+        current_frame_mapmos_labels = dynamic_mask_mapmos.cpu().numpy().astype(np.int32).reshape(-1, 1)
+        assert current_frame_mapmos_labels.shape[0] == sensor_fused_pc.points.T.shape[0], \
+            "Mismatch between number of points in scan and generated labels"
+
+        total_mapmos_dynamic_labels = dynamic_mask_mapmos.sum().item()
+        print(f"Total points labeled as dynamic for MapMOS input (annotated dynamic + ego): {total_mapmos_dynamic_labels}")
+
         ego_filter_mask = ~inside_ego_mask
 
         points_mask = static_mask & ego_filter_mask
 
         pc_ego_unfiltered = sensor_fused_pc.points.T[points_mask]
-        pc_ego_unfiltered_sensors = sensor_ids_points.T[points_mask]
+        pc_ego_unfiltered_sensors = sensor_ids_points.copy().T[points_mask]
         print(
             f"Number of static points extracted: {pc_ego_unfiltered.shape} with sensor_ids {pc_ego_unfiltered_sensors.shape}")
 
@@ -2037,7 +2099,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             print(f"Box {box_idx} contains {num_in_box} points")"""
 
         pc_with_semantic_ego_unfiltered = pc_with_semantic[points_mask]
-        pc_with_semantic_ego_unfiltered_sensors = sensor_ids_points.T[points_mask]
+        pc_with_semantic_ego_unfiltered_sensors = sensor_ids_points.copy().T[points_mask]
         print(
             f"Number of semantic static points extracted: {pc_with_semantic_ego_unfiltered.shape} with sensor_ids {pc_with_semantic_ego_unfiltered_sensors.shape}")
 
@@ -2057,7 +2119,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         ############################################################################################################
 
         pc_ego = pc_ego_unfiltered.copy()
-        pc_with_semantic_ego = pc_with_semantic_ego_unfiltered.copy()
+        # pc_with_semantic_ego = pc_with_semantic_ego_unfiltered.copy()
 
         ########################################## Lidar intensity filtering #######################################
         if args.filter_lidar_intensity:
@@ -2066,7 +2128,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             # split on the dot and take the second piece
             weather = weather_tag.split('.', 1)[1]
 
-            if weather == 'snow' or weather == 'rain':
+            if weather == 'snow' or weather == 'rain' or weather == 'fog':
                 print(
                     f"Lidar intensity filtering for bad weather: {weather} with intensity {intensity_threshold} and distance threshold {distance_intensity_threshold} metres")
                 print(f'Shape of pc_ego before weather filtering: {pc_ego.shape}')
@@ -2087,8 +2149,8 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
                 pc_ego = pc_ego[filter_keep_mask]
                 pc_ego_unfiltered_sensors = pc_ego_unfiltered_sensors[filter_keep_mask]
-                pc_with_semantic_ego = pc_with_semantic_ego[filter_keep_mask]
-                pc_with_semantic_ego_unfiltered_sensors = pc_with_semantic_ego_unfiltered_sensors[filter_keep_mask]
+                # pc_with_semantic_ego = pc_with_semantic_ego[filter_keep_mask]
+                # pc_with_semantic_ego_unfiltered_sensors = pc_with_semantic_ego_unfiltered_sensors[filter_keep_mask]
 
                 print(f'Shape of pc_ego after weather filtering: {pc_ego.shape}')
 
@@ -2114,16 +2176,16 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             )
             pc_ego = np.asarray(filtered_pcd_static.points)
             pc_ego_unfiltered_sensors = pc_ego_unfiltered_sensors[kept_indices]
-            pc_with_semantic_ego = pc_with_semantic_ego[kept_indices]  # ✅ Only filter here
-            pc_with_semantic_ego_unfiltered_sensors = pc_with_semantic_ego_unfiltered_sensors[kept_indices]
+            # pc_with_semantic_ego = pc_with_semantic_ego[kept_indices]  # ✅ Only filter here
+            # pc_with_semantic_ego_unfiltered_sensors = pc_with_semantic_ego_unfiltered_sensors[kept_indices]
 
         assert pc_ego.shape[0] == pc_ego_unfiltered_sensors.shape[0], (
             f"static points ({pc_ego.shape[0]}) != sensor_ids ({pc_ego_unfiltered_sensors.shape[0]})"
         )
-        assert pc_with_semantic_ego.shape[0] == pc_with_semantic_ego_unfiltered_sensors.shape[0], (
+        """assert pc_with_semantic_ego.shape[0] == pc_with_semantic_ego_unfiltered_sensors.shape[0], (
             f"semantic points ({pc_with_semantic_ego.shape[0]}) != semantic_sensor_ids "
             f"({pc_with_semantic_ego_unfiltered_sensors.shape[0]})"
-        )
+        )"""
 
         ############################ Visualization #############################################################
         if args.vis_static_pc and args.filter_static_pc:
@@ -2158,16 +2220,16 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         # --- Transform FILTERED static points TO REFERENCE EGO FRAME ---
         # Inputs to transform_points should be the filtered points: pc_ego, pc_with_semantic_ego
         points_in_ref_frame = transform_points(pc_ego, ego_ref_from_ego_i)
-        semantic_points_in_ref_frame = transform_points(pc_with_semantic_ego, ego_ref_from_ego_i)
+        #semantic_points_in_ref_frame = transform_points(pc_with_semantic_ego, ego_ref_from_ego_i)
         print(f"Frame {i}: Transformed static points to ref ego. Shape: {points_in_ref_frame.shape}")
-        print(f"Frame {i}: Transformed semantic static points to ref ego. Shape: {semantic_points_in_ref_frame.shape}")
+        #print(f"Frame {i}: Transformed semantic static points to ref ego. Shape: {semantic_points_in_ref_frame.shape}")
 
         # --- Transform FILTERED static points TO GLOBAL FRAME ---
         points_in_global_frame = transform_points(pc_ego, global_from_ego_i)
-        semantic_points_in_global_frame = transform_points(pc_with_semantic_ego, global_from_ego_i)
+        #semantic_points_in_global_frame = transform_points(pc_with_semantic_ego, global_from_ego_i)
         print(f"Frame {i}: Transformed static points to global. Shape: {points_in_global_frame.shape}")
-        print(
-            f"Frame {i}: Transformed semantic static points to global. Shape: {semantic_points_in_global_frame.shape}")
+        #print(
+         #   f"Frame {i}: Transformed semantic static points to global. Shape: {semantic_points_in_global_frame.shape}")
 
         if args.vis_static_pc_global:
             visualize_pointcloud(points_in_ref_frame, title=f"Fused sensor PC in world coordinates - Frame {i}")
@@ -2175,15 +2237,17 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         # Assign the calculated variables to the desired keys
         pc_ego_i_save = pc_ego.copy()  # Filtered points in current ego frame (Features, N)
         print(f"Frame {i}: Static points in ego frame shape: {pc_ego_i_save.shape}")
-        pc_with_semantic_ego_i_save = pc_with_semantic_ego.copy()  # Filtered semantic points in current ego frame (Features+1, N)
-        print(f"Frame {i}: Static semantic points in ego frame shape: {pc_with_semantic_ego_i_save.shape}")
+        # pc_with_semantic_ego_i_save = pc_with_semantic_ego.copy()  # Filtered semantic points in current ego frame (Features+1, N)
+        # print(f"Frame {i}: Static semantic points in ego frame shape: {pc_with_semantic_ego_i_save.shape}")
         pc_ego_ref_save = points_in_ref_frame.copy()  # Filtered points transformed to reference ego frame (Features, N)
-        pc_with_semantic_ego_ref_save = semantic_points_in_ref_frame.copy()  # Filtered semantic points transformed to reference ego frame (Features+1, N)
+        # pc_with_semantic_ego_ref_save = semantic_points_in_ref_frame.copy()  # Filtered semantic points transformed to reference ego frame (Features+1, N)
         pc_global_save = points_in_global_frame.copy()  # Filtered points transformed to global frame (Features, N)
-        pc_with_semantic_global_save = semantic_points_in_global_frame.copy()  # Filtered semantic points transformed to global frame (Features+1, N)
+        # pc_with_semantic_global_save = semantic_points_in_global_frame.copy()  # Filtered semantic points transformed to global frame (Features+1, N)
 
         ################## record information into a dict  ########################
         ref_sd = trucksc.get('sample_data', sample['sample_data_token'])
+
+        print(sensor_ids_points.T.shape)
 
         frame_dict = {
             "sample_timestamp": sample['timestamp'],
@@ -2197,16 +2261,17 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             "object_points_list_sensor_ids": objects_points_list_sensor_ids,
             "raw_lidar_ego": sensor_fused_pc.points.T,
             "raw_lidar_ego_sensor_ids": sensor_ids_points.T,
+            "mapmos_per_point_labels": current_frame_mapmos_labels,
             "lidar_pc_ego_i": pc_ego_i_save,  # Filtered static points in CURRENT ego frame (i)
             "lidar_pc_ego_sensor_ids": pc_ego_unfiltered_sensors,
-            "lidar_pc_with_semantic_ego_i": pc_with_semantic_ego_i_save,
-            "lidar_pc_with_semantic_ego_sensor_ids": pc_with_semantic_ego_unfiltered_sensors,
+            # "lidar_pc_with_semantic_ego_i": pc_with_semantic_ego_i_save,
+            # "lidar_pc_with_semantic_ego_sensor_ids": pc_with_semantic_ego_unfiltered_sensors,
             # Filtered semantic static points in CURRENT ego frame (i)
             "lidar_pc_ego_ref": pc_ego_ref_save,  # Filtered static points transformed to REFERENCE ego frame
-            "lidar_pc_with_semantic_ego_ref": pc_with_semantic_ego_ref_save,
+            # "lidar_pc_with_semantic_ego_ref": pc_with_semantic_ego_ref_save,
             # Filtered semantic static points transformed to REFERENCE ego frame
             "lidar_pc_global": pc_global_save,  # Filtered static points transformed to GLOBAL frame
-            "lidar_pc_with_semantic_global": pc_with_semantic_global_save,
+            # "lidar_pc_with_semantic_global": pc_with_semantic_global_save,
             # Filtered semantic static points transformed to GLOBAL frame
             "ego_pose": ego_pose_i,  # Current frame's ego pose dictionary
             # "lidar_calibrated_sensor": ref_calibrated_sensor # Uncomment if needed
@@ -2239,11 +2304,11 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
     # Extract semantic static points (already in ref ego frame, Features+1 x N format)
     # Use the correct key from the dictionary populated earlier
-    unrefined_sem_pc_ego_list = [frame_dict['lidar_pc_with_semantic_ego_i'] for frame_dict in dict_list]
-    print(f"Extracted {len(unrefined_sem_pc_ego_list)} semantic point clouds (in ego i frame).")
+    # unrefined_sem_pc_ego_list = [frame_dict['lidar_pc_with_semantic_ego_i'] for frame_dict in dict_list]
+    # print(f"Extracted {len(unrefined_sem_pc_ego_list)} semantic point clouds (in ego i frame).")
 
-    unrefined_sem_pc_ego_list_sensor_ids = [frame_dict['lidar_pc_with_semantic_ego_sensor_ids'] for frame_dict in
-                                            dict_list]
+    # unrefined_sem_pc_ego_list_sensor_ids = [frame_dict['lidar_pc_with_semantic_ego_sensor_ids'] for frame_dict in
+      #                                      dict_list]
 
     pc_ego_combined_draw = np.concatenate(unrefined_pc_ego_list, axis=0)
     print(f"Pc ego i combined shape: {pc_ego_combined_draw.shape}")
@@ -2259,10 +2324,10 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     unrefined_pc_ego_ref_list = [frame_dict['lidar_pc_ego_ref'] for frame_dict in dict_list]
     print(f"Extracted {len(unrefined_pc_ego_ref_list)} static point clouds (in ego ref frame).")
     unrefined_pc_ego_ref_list_sensor_ids = [frame_dict['lidar_pc_ego_sensor_ids'] for frame_dict in dict_list]
-    unrefined_sem_pc_ego_ref_list = [frame_dict['lidar_pc_with_semantic_ego_ref'] for frame_dict in dict_list]
-    print(f"Extracted {len(unrefined_sem_pc_ego_ref_list)} semantic static point clouds (in ego ref frame).")
-    unrefined_sem_pc_ego_ref_list_sensor_ids = [frame_dict['lidar_pc_with_semantic_ego_sensor_ids'] for frame_dict in
-                                                dict_list]
+    # unrefined_sem_pc_ego_ref_list = [frame_dict['lidar_pc_with_semantic_ego_ref'] for frame_dict in dict_list]
+    # print(f"Extracted {len(unrefined_sem_pc_ego_ref_list)} semantic static point clouds (in ego ref frame).")
+    # unrefined_sem_pc_ego_ref_list_sensor_ids = [frame_dict['lidar_pc_with_semantic_ego_sensor_ids'] for frame_dict in
+      #                                          dict_list]
 
     pc_ego_ref_combined_draw = np.concatenate(unrefined_pc_ego_ref_list, axis=0)
     print(f"Pc ego ref combined shape: {pc_ego_ref_combined_draw.shape}")
@@ -2278,8 +2343,8 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
     unrefined_pc_global_list = [frame_dict['lidar_pc_global'] for frame_dict in dict_list]
     print(f"Extracted {len(unrefined_pc_global_list)} static point clouds (in world frame).")
-    unrefined_sem_pc_global_list = [frame_dict['lidar_pc_with_semantic_global'] for frame_dict in dict_list]
-    print(f"Extracted {len(unrefined_sem_pc_global_list)} semantic static point clouds (in world frame).")
+    # unrefined_sem_pc_global_list = [frame_dict['lidar_pc_with_semantic_global'] for frame_dict in dict_list]
+    # print(f"Extracted {len(unrefined_sem_pc_global_list)} semantic static point clouds (in world frame).")
 
     pc_global_combined_draw = np.concatenate(unrefined_pc_global_list, axis=0)
     print(f"Pc global shape: {pc_global_combined_draw.shape}")
@@ -2295,6 +2360,8 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
     raw_pc_list = [frame_dict['raw_lidar_ego'] for frame_dict in dict_list]
     print(f"Extracted {len(raw_pc_list)} static and dynamic point clouds (in ego i frame).")
+    raw_pc_list_sensor_ids = [frame_dict['raw_lidar_ego_sensor_ids'] for frame_dict in dict_list]
+    print(f"Extracted {len(raw_pc_list_sensor_ids)} sensor ids for static and dynamic point clouds (in ego i frame).")
     raw_pc_draw = np.concatenate(raw_pc_list, axis=0)
     print(f"Raw Pc with static and dynamic points shape: {raw_pc_draw.shape}")
 
@@ -2340,11 +2407,13 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     estimated_poses_kiss = None
     log_dir_mapmos = osp.join(save_path, scene_name, "mapmos_logs")
 
-    mapmos_labels_per_scan = []
+    """mapmos_labels_per_scan = []
     for point_cloud_in_frame in raw_pc_list:
         num_points_in_frame = point_cloud_in_frame.shape[0]
         random_labels_for_frame = np.random.randint(0, 2, size=(num_points_in_frame, 1), dtype=np.int32)
-        mapmos_labels_per_scan.append(random_labels_for_frame)
+        mapmos_labels_per_scan.append(random_labels_for_frame)"""
+
+    mapmos_labels_per_scan = [frame_dict['mapmos_per_point_labels'] for frame_dict in dict_list]
 
     try:
         print("Initializing InMemoryDatasetMapMOS...")
@@ -2383,7 +2452,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
             mapmos_start_time = time.time()
             print("Running MapMOS pipeline...")
-            run_output = mapmos_pipeline.run()
+            run_output, all_frame_predictions = mapmos_pipeline.run()
             mapmos_end_time = time.time()
             print(f"MapMOS pipeline finished in {mapmos_end_time - mapmos_start_time:.2f} seconds.")
 
@@ -2397,8 +2466,88 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                 # For example, the results might be saved to files if save_ply=True,
                 # or accessible via methods on mapmos_pipeline_instance.
 
+            # Now you can iterate through all_frame_predictions
+            """for frame_data in all_frame_predictions:
+                scan_idx = frame_data["scan_index"]
+                points = frame_data["points"]
+                predicted_labels = frame_data["predicted_labels"]  # These are your belief_labels_query
+                gt_labels = frame_data["gt_labels"]  # These are your query_labels
+
+                print(
+                    f"Scan Index: {scan_idx}, Points shape: {points.shape}, Predicted Labels shape: {predicted_labels.shape}, GT Labels shape: {gt_labels.shape}")
+
+                visualize_mapmos_predictions(
+                    points_xyz=points,
+                    predicted_labels=predicted_labels,
+                    scan_index=scan_idx,
+                    window_title_prefix=f"MapMOS Output ({scene_name})"  # Using your scene_name
+                )
+
+                # Example: Filter dynamic points based on MapMOS prediction
+                # Assuming 1 means dynamic, 0 means static in predicted_labels
+                dynamic_points = points[predicted_labels == 1]
+                static_points = points[predicted_labels == 0]
+                print(f"  - Found {dynamic_points.shape[0]} dynamic points and {static_points.shape[0]} static points.")"""
+
         except Exception as e:
             print(f"Error during MapMOS pipeline execution: {e}")
+
+    static_points_mapmos = []
+    static_points_mapmos_sensor_ids = []
+
+    if all_frame_predictions:
+        print(f"\n--- Filtering static points for all {len(all_frame_predictions)} frames ---")
+        for frame_idx, frame_data in enumerate(all_frame_predictions):
+            original_points_in_frame = raw_pc_list[frame_idx]
+            original_points_in_frame_sensor_ids = raw_pc_list_sensor_ids[frame_idx]
+
+            # Condition 1: Point was considered STATIC in your input GT to MapMOS
+            input_gt_is_static_mask = (mapmos_labels_per_scan[frame_idx].flatten() == 0)
+
+            # Condition 2: Point was NOT predicted as DYNAMIC by MapMOS
+            mapmos_predicted_labels = frame_data["predicted_labels"]
+            mapmos_not_predicted_dynamic_mask = (
+                    mapmos_predicted_labels != 1)  # True if MapMOS predicted 0 (static) or -1 (unclassified)
+
+            # Combine both conditions with logical AND
+            final_static_mask_for_frame = input_gt_is_static_mask & mapmos_not_predicted_dynamic_mask
+
+            # Apply the mask to get the static points for the current frame
+            static_points_this_frame = original_points_in_frame[final_static_mask_for_frame]
+            static_points_mapmos.append(static_points_this_frame)
+            static_points_this_frame_sensor_ids = original_points_in_frame_sensor_ids[final_static_mask_for_frame]
+            static_points_mapmos_sensor_ids.append(static_points_this_frame_sensor_ids)
+
+    print(f"Static points list mapmos: {len(static_points_mapmos)} frames with sensor ids: {len(static_points_mapmos_sensor_ids)}")
+
+    """raw_pc_0 = raw_pc_list[0]
+
+    # Condition 1: Point is NOT dynamic in your GT input to MapMOS
+    input_gt_is_static_mask = (mapmos_labels_per_scan[0].flatten() == 0)
+
+    # Condition 2: Point is NOT classified as dynamic by MapMOS prediction
+    mapmos_predicted_labels = all_frame_predictions[0]["predicted_labels"]
+    mapmos_not_predicted_dynamic_mask = (
+                mapmos_predicted_labels != 1)  # True if MapMOS predicted 0 (static) or -1 (unclassified)
+
+    # Combine both conditions: A point is truly static if both are true
+    final_static_mask = input_gt_is_static_mask & mapmos_not_predicted_dynamic_mask
+
+    # Filter raw_pc_0 using this final static mask
+    static_points_from_raw_pc_0 = raw_pc_0[final_static_mask]
+
+    print(f"--- Filtering for Frame 0 ---")
+    print(f"Original number of points in raw_pc_0: {raw_pc_0.shape[0]}")
+    print(f"Number of points static according to your input GT: {np.sum(input_gt_is_static_mask)}")
+    print(f"Number of points NOT predicted as dynamic by MapMOS: {np.sum(mapmos_not_predicted_dynamic_mask)}")
+    print(f"Number of points satisfying BOTH static conditions: {static_points_from_raw_pc_0.shape[0]}")
+
+
+    pcd_static_vis = o3d.geometry.PointCloud()
+    pcd_static_vis.points = o3d.utility.Vector3dVector(static_points_from_raw_pc_0[:, :3])
+    pcd_static_vis.paint_uniform_color([0.0, 0.0, 1.0])  # Blue for these static points
+    o3d.visualization.draw_geometries([pcd_static_vis],
+                                      window_name=f"Final Static Points (Frame 0)")"""
 
 
     poses_kiss_icp = None
@@ -2470,9 +2619,9 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         if args.icp_refinement and estimated_poses_kiss is not None:
             print("Applying refined poses from KISS-ICP...")
             refined_lidar_pc_list = []
-            refined_lidar_pc_with_semantic_list = []
+            # refined_lidar_pc_with_semantic_list = []
 
-            for idx, points_ego in enumerate(unrefined_pc_ego_list):
+            for idx, points_ego in enumerate(unrefined_pc_ego_list): #(static_points_mapmos): # (unrefined_pc_ego_list):
                 pose = estimated_poses_kiss[idx]
                 print(f"Applying refined pose {idx}: {pose}")
 
@@ -2490,7 +2639,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
                 refined_lidar_pc_list.append(points_transformed)
 
-            for idx, points_semantic_ego in enumerate(unrefined_sem_pc_ego_list):
+            """for idx, points_semantic_ego in enumerate(unrefined_sem_pc_ego_list):
                 pose = estimated_poses_kiss[idx]
                 print(f"Applying refined pose {idx}: {pose}")
 
@@ -2503,7 +2652,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                     other_features = points_semantic_ego[:, 3:]
                     points_transformed = np.hstack((points_transformed, other_features))
 
-                refined_lidar_pc_with_semantic_list.append(points_transformed)
+                refined_lidar_pc_with_semantic_list.append(points_transformed)"""
 
         # --- 4. Compare KISS-ICP Poses with Ground Truth ---
         if 'gt_relative_poses_arr' in locals() and gt_relative_poses_arr.shape[0] > 0:  # Check if GT poses were loaded
@@ -2639,27 +2788,28 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         print("ICP refinement is OFF. Using unrefined points (in reference ego frame) for aggregation.")
         # These are lists of (N, D) arrays, already in reference ego frame
         source_pc_list_all_frames = unrefined_pc_ego_ref_list
-        source_sem_pc_list_all_frames = unrefined_sem_pc_ego_ref_list
+        # source_sem_pc_list_all_frames = unrefined_sem_pc_ego_ref_list
         source_pc_sids_list_all_frames = unrefined_pc_ego_ref_list_sensor_ids
-        source_sem_sids_list_all_frames = unrefined_sem_pc_ego_ref_list_sensor_ids
+        # source_sem_sids_list_all_frames = unrefined_sem_pc_ego_ref_list_sensor_ids
     else:
         print("ICP refinement is ON. Using KISS-ICP refined points for aggregation.")
         # These are lists of (N, D) arrays, in the KISS-ICP refined global/map frame
         source_pc_list_all_frames = refined_lidar_pc_list
-        source_sem_pc_list_all_frames = refined_lidar_pc_with_semantic_list
+        # source_sem_pc_list_all_frames = refined_lidar_pc_with_semantic_list
         # SIDs lists for refined PCs are typically the same as their unrefined counterparts,
         # as ICP only affects poses, not point identities or origins relative to sensor.
         # IMPORTANT: Ensure these unrefined SIDs lists correspond to the frames in refined_lidar_pc_list
         source_pc_sids_list_all_frames = unrefined_pc_ego_list_sensor_ids  # SIDs from ego_i list
-        source_sem_sids_list_all_frames = unrefined_sem_pc_ego_list_sensor_ids  # SIDs from ego_i list
+        # source_pc_sids_list_all_frames = static_points_mapmos_sensor_ids
+        # source_sem_sids_list_all_frames = unrefined_sem_pc_ego_list_sensor_ids  # SIDs from ego_i list
 
     #################################### Filtering based on if only keyframes should be used ###########################
     print(f"Static map aggregation: --static_map_keyframes_only is {args.static_map_keyframes_only}")
 
     lidar_pc_list_for_concat = []
     lidar_pc_sids_list_for_concat = []
-    lidar_pc_with_semantic_list_for_concat = []
-    lidar_pc_with_semantic_sids_list_for_concat = []
+    # lidar_pc_with_semantic_list_for_concat = []
+    # lidar_pc_with_semantic_sids_list_for_concat = []
 
     for idx, frame_info in enumerate(dict_list):
         is_key = frame_info['is_key_frame']
@@ -2680,7 +2830,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                     print(
                         f"Warning: Frame {idx} has {source_pc_list_all_frames[idx].shape[0]} static points but missing/empty SIDs.")
 
-            # Add semantic static points
+            """# Add semantic static points
             if idx < len(source_sem_pc_list_all_frames) and source_sem_pc_list_all_frames[idx].shape[0] > 0:
                 lidar_pc_with_semantic_list_for_concat.append(source_sem_pc_list_all_frames[idx])
                 if idx < len(source_sem_sids_list_all_frames) and source_sem_sids_list_all_frames[idx].shape[
@@ -2688,7 +2838,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                     lidar_pc_with_semantic_sids_list_for_concat.append(source_sem_sids_list_all_frames[idx])
                 elif source_sem_pc_list_all_frames[idx].shape[0] > 0:
                     print(
-                        f"Warning: Frame {idx} has {source_sem_pc_list_all_frames[idx].shape[0]} semantic points but missing/empty SIDs.")
+                        f"Warning: Frame {idx} has {source_sem_pc_list_all_frames[idx].shape[0]} semantic points but missing/empty SIDs.")"""
         else:
             print(
                 f"  Skipping frame {idx} (Keyframe: {is_key}) for static map aggregation due to --static_map_keyframes_only.")
@@ -2718,7 +2868,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     #############################################################################################################
 
     ################## concatenate all semantic scene segments ########################
-    if lidar_pc_with_semantic_list_for_concat:
+    """if lidar_pc_with_semantic_list_for_concat:
         print(f"Concatenating semantic pc from {len(lidar_pc_with_semantic_list_for_concat)} frames")
         lidar_pc_with_semantic_final_global = np.concatenate(lidar_pc_with_semantic_list_for_concat,
                                                              axis=0)  # Shape (N_total, Features)
@@ -2733,15 +2883,15 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     else:
         sys.exit()
 
-    assert lidar_pc_with_semantic_final_global.shape[0] == lidar_pc_with_semantic_final_global_sensor_ids.shape[0]
+    assert lidar_pc_with_semantic_final_global.shape[0] == lidar_pc_with_semantic_final_global_sensor_ids.shape[0]"""
 
     ####################################################################################################################
 
     lidar_pc = lidar_pc_final_global.T
-    lidar_pc_with_semantic = lidar_pc_with_semantic_final_global.T
+    # lidar_pc_with_semantic = lidar_pc_with_semantic_final_global.T
 
     lidar_pc_sensor_ids = lidar_pc_final_global_sensor_ids
-    lidar_pc_with_semantic_sensor_ids = lidar_pc_with_semantic_final_global_sensor_ids
+    # lidar_pc_with_semantic_sensor_ids = lidar_pc_with_semantic_final_global_sensor_ids
 
     ########################################### Visualization #########################################################
     if args.vis_static_frame_comparison_kiss_refined:
@@ -2808,9 +2958,9 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                                                             location_msg="aggregated static points")
         lidar_pc = lidar_pc[:, kept_indices]
         lidar_pc_sensor_ids = lidar_pc_sensor_ids[kept_indices]
-        lidar_pc_with_semantic = lidar_pc_with_semantic[:,
-                                 kept_indices]  # Only here if lidar_pc and lidar_pc_semantics are the same
-        lidar_pc_with_semantic_sensor_ids = lidar_pc_with_semantic_sensor_ids[kept_indices]
+        #lidar_pc_with_semantic = lidar_pc_with_semantic[:,
+         #                        kept_indices]  # Only here if lidar_pc and lidar_pc_semantics are the same
+        #lidar_pc_with_semantic_sensor_ids = lidar_pc_with_semantic_sensor_ids[kept_indices]
 
 
     """if args.filter_aggregated_static_pc and args.filter_mode != 'none':
@@ -2825,11 +2975,11 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         f"point count ({lidar_pc.shape[1]}) != sensor_ids count ({lidar_pc_sensor_ids.shape[0]})"
     )
 
-    # ensure each semantic point has a sensor id
+    """# ensure each semantic point has a sensor id
     assert lidar_pc_with_semantic.shape[1] == lidar_pc_with_semantic_sensor_ids.shape[0], (
         f"semantic point count ({lidar_pc_with_semantic.shape[1]}) != "
         f"semantic_sensor_ids count ({lidar_pc_with_semantic_sensor_ids.shape[0]})"
-    )
+    )"""
 
     ############################## Visualization ######################################################
 
@@ -2927,12 +3077,12 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         # extract points from transformed point clouds
         point_cloud = lidar_pc[:3,
                       :]  # extract transformed static points, T to switch dims from (3,N) to (N, 3)
-        point_cloud_with_semantic = lidar_pc_with_semantic  # retrieves transformed semantic points with labels (N, 4): [x, y, z, label]
+        # point_cloud_with_semantic = lidar_pc_with_semantic  # retrieves transformed semantic points with labels (N, 4): [x, y, z, label]
         point_cloud_sensor_ids = lidar_pc_sensor_ids
-        point_cloud_with_semantic_sensor_ids = lidar_pc_with_semantic_sensor_ids
+        # point_cloud_with_semantic_sensor_ids = lidar_pc_with_semantic_sensor_ids
         print(f"Original point_cloud: {point_cloud.shape} with sensor ids: {point_cloud_sensor_ids.shape}")
-        print(
-            f"Original semantic point_cloud: {point_cloud_with_semantic.shape} with sensor ids: {point_cloud_with_semantic_sensor_ids.shape}")
+        #print(
+         #   f"Original semantic point_cloud: {point_cloud_with_semantic.shape} with sensor ids: {point_cloud_with_semantic_sensor_ids.shape}")
 
         # === Transform back to ego frame ===
         sample = truckscenes.get('sample', frame_dict['sample_token'])
@@ -2959,9 +3109,9 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
         # Get global point clouds for this iteration (use copies to avoid modifying originals accidentally)
         point_cloud_global_xyz = lidar_pc[:3, :].copy()  # Global static XYZ (3, N)
-        point_cloud_global_xyzl = lidar_pc_with_semantic.copy()  # Global static XYZ+L (4+, N)
+        # point_cloud_global_xyzl = lidar_pc_with_semantic.copy()  # Global static XYZ+L (4+, N)
         print(f"Global point_cloud shape: {point_cloud_global_xyz.shape}")
-        print(f"Global semantic point_cloud shape: {point_cloud_global_xyzl.shape}")
+        # print(f"Global semantic point_cloud shape: {point_cloud_global_xyzl.shape}")
 
         # --- Transform scene static points (point_cloud) ---
         if point_cloud_global_xyz.shape[1] > 0:
@@ -2972,7 +3122,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         else:
             point_cloud = np.zeros((3, 0), dtype=point_cloud_global_xyz.dtype)
 
-        # --- Transform semantic points as well (point_cloud_with_semantic) ---
+        """# --- Transform semantic points as well (point_cloud_with_semantic) ---
         if point_cloud_global_xyzl.shape[1] > 0:
             # Create homogeneous coords from the global semantic points' XYZ
             sem_homo = np.hstack(
@@ -2992,18 +3142,18 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         else:
             # Handle empty case - ensure correct number of rows if needed
             num_sem_rows = lidar_pc_with_semantic.shape[0]  # Get original number of rows
-            point_cloud_with_semantic = np.zeros((num_sem_rows, 0), dtype=lidar_pc_with_semantic.dtype)
+            point_cloud_with_semantic = np.zeros((num_sem_rows, 0), dtype=lidar_pc_with_semantic.dtype)"""
 
         # Prints after transformation:
         print(f"Ego point_cloud shape: {point_cloud.shape} with sensor ids: {point_cloud_sensor_ids.shape}")
         # Optional: print first few points' ego coords: print(point_cloud[:,:5])
-        print(
+        """print(
             f"Ego semantic point_cloud shape: {point_cloud_with_semantic.shape} with sensor ids: {point_cloud_with_semantic_sensor_ids.shape}")
         # Optional: print first few points' ego coords + labels: print(point_cloud_with_semantic[:,:5])
 
         assert point_cloud.shape[1] == point_cloud_with_semantic.shape[1], \
             f"Ego point counts mismatch after transform: {point_cloud.shape[1]} vs {point_cloud_with_semantic.shape[1]}"
-
+        """
         assert point_cloud.shape[1] == point_cloud_sensor_ids.shape[0]
 
         ################## load bbox of target frame ##############
@@ -3170,18 +3320,30 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         try:
             temp = np.concatenate(object_semantic_list)
             temp_sids = np.concatenate(object_semantic_sids_list)
+
+            pts_xyz = point_cloud.T
+
+            num_points_pc = point_cloud.shape[1]
+            points_label = np.full((num_points_pc, 1), BACKGROUND_LEARNING_INDEX, dtype=np.uint8)
+            point_cloud_with_semantic = np.concatenate([pts_xyz, points_label], axis=1)
+
+            point_cloud_with_semantic_sensor_ids = point_cloud_sensor_ids.copy()
             """# ---- EXPORT temp points ----
             np.save(output_filepath_sem_temp, temp)
             print(f"Saved temp object points for frame {i} to {output_filepath_sem_temp}")
             # ----------------------------"""
             # scene_semantic_points = point_cloud_with_semantic.T
             scene_semantic_points = np.concatenate(
-                [point_cloud_with_semantic.T, temp])  # Merge semantic points from objects and static scenes
+                [point_cloud_with_semantic, temp])  # Merge semantic points from objects and static scenes
             scene_semantic_points_sids = np.concatenate([point_cloud_with_semantic_sensor_ids, temp_sids])
         except:
             print("Error concatenating semantic static and object points.")
-            scene_semantic_points = point_cloud_with_semantic  # If no object points, only use static scene points
-            scene_semantic_points_sids = point_cloud_with_semantic_sensor_ids
+            pts_xyz = point_cloud.T
+            background_label = np.full((pts_xyz.shape[0], 1), BACKGROUND_LEARNING_INDEX, dtype=np.uint8)
+            scene_semantic_points = np.concatenate([pts_xyz, background_label], axis=1)
+            scene_semantic_points_sids = point_cloud_sensor_ids.copy()
+            #scene_semantic_points = point_cloud_with_semantic  # If no object points, only use static scene points
+            #scene_semantic_points_sids = point_cloud_with_semantic_sensor_ids
 
         assert scene_points_sids.shape == scene_semantic_points_sids.shape
 
