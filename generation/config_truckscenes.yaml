@@ -13,12 +13,12 @@
 
 # Voxel parameters
 'voxel_size': 0.2 #0.4 # 0.5
-'occ_size':  [600, 600, 75]
+'occ_size':  [200, 200, 150]
 
 # Parameters for ranges
 # 'self_range': [3.0, 3.0, 3.0]
 'self_range': [-1.5, -1.5, -1.0, 6.3, 1.5, 4.2]
-'pc_range':  [-60, -60, -5, 60, 60, 10]
+'pc_range':  [-40, -40, -5, 40, 40, 30]
 
 # Filtering parameters
 # Filtering statistical outlier removal:
@@ -34,10 +34,10 @@ ror_radius: 0.8
 # sensors: ['LIDAR_LEFT', 'LIDAR_RIGHT']
 sensors: ['LIDAR_LEFT', 'LIDAR_RIGHT', 'LIDAR_TOP_FRONT', 'LIDAR_TOP_LEFT', 'LIDAR_TOP_RIGHT', 'LIDAR_REAR']
 cameras: ['CAMERA_LEFT_FRONT', 'CAMERA_RIGHT_FRONT', 'CAMERA_LEFT_BACK', 'CAMERA_RIGHT_BACK']
-max_time_diff: 80000
+max_time_diff: 90000
 
 # Parameters for camera visibility
-'camera_ray_depth_max': 140
+'camera_ray_depth_max': 100
 
 # Parameters for lidar intensity filtering
 'intensity_threshold': 0
