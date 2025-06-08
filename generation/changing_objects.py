@@ -409,13 +409,14 @@ def get_images(trucksc, my_sample, sensor):
 
 def main(trucksc):
     sensors = ['LIDAR_LEFT', 'LIDAR_RIGHT', 'LIDAR_TOP_FRONT', 'LIDAR_TOP_LEFT', 'LIDAR_TOP_RIGHT', 'LIDAR_REAR']
-    my_scene = trucksc.scene[0]
+    my_scene = trucksc.scene[4]
     scene_name = my_scene['name']
 
     first_sample_token = my_scene['first_sample_token']
     my_sample = trucksc.get('sample', first_sample_token)
     print(my_sample)
 
+    sample_idx = 0
     while True:
         boxes = get_boxes(trucksc, my_sample)
 
@@ -427,7 +428,8 @@ def main(trucksc):
                 token = getattr(box, 'token', 'N/A')  # Use getattr for safety
                 wlh = getattr(box, 'wlh', [np.nan, np.nan, np.nan])  # Use getattr for safety
                 # Format the output clearly. Note: box.wlh = [width(y), length(x), height(z)]
-                print(f"  Box {i + 1}: Token={token} | Dimensions (W, L, H)=[{wlh[0]:.2f}, {wlh[1]:.2f}, {wlh[2]:.2f}]")
+                category = getattr(box, 'name', 'N/A')
+                print(f"  Box {i + 1}: Token={token} | Category={category} | Dimensions (W, L, H)=[{wlh[0]:.2f}, {wlh[1]:.2f}, {wlh[2]:.2f}]")
         else:
             print("  No valid boxes to display dimensions for in this sample.")
         print("----------------------")
@@ -439,6 +441,7 @@ def main(trucksc):
             next_sample_token = my_sample.get('next', '')  # Use .get for safety
             if next_sample_token:
                 my_sample = trucksc.get('sample', next_sample_token)
+                sample_idx += 1
             else:
                 print("End of scene reached.")
                 break  # Exit the while loop
@@ -495,12 +498,13 @@ def main(trucksc):
         plt.show()
 
         visualize_pointcloud_bbox(pc_fused_ego, gt_boxes=gt_bbox_3d,
-                                  title=f"Fused filtered static sensor PC + BBoxes - Frame")
+                                  title=f"Fused filtered static sensor PC + BBoxes - Frame {sample_idx}")
 
 
         next_sample_token = my_sample['next']
         if next_sample_token != '':
             my_sample = trucksc.get('sample', next_sample_token)
+            sample_idx += 1
         else:
             break
 
@@ -510,6 +514,9 @@ if __name__ == '__main__':
     truckscenes = TruckScenes(version='v1.0-trainval',
                               dataroot='/home/max/ssd/Masterarbeit/TruckScenes/trainval/v1.0-trainval',
                               verbose=True)
+
+    main(truckscenes)
+
     changed_count = 0
     changed_scenes_list = []
     for i in range(0, 597):
