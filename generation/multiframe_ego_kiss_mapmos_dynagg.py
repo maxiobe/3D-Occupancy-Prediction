@@ -2014,21 +2014,26 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
         ##################################################### get manual boxes for terminal scenes ###################################
         if indice in scene_terminal_list:
+            annotation_base = os.path.join(data_root, 'annotation')
             if sample['is_key_frame']:
-                annotation_base = os.path.join(data_root, 'annotation')
                 load_pcd_annotation_filename = f"{i:06d}_keyframe.json"
-                annotation_data_load_path = os.path.join(annotation_base, scene_name, 'annotations',
-                                                         load_pcd_annotation_filename)
-                manual_boxes = parse_single_annotation_file(annotation_data_load_path)
+                load_annotation_ending = os.path.join('keyframes', load_pcd_annotation_filename)
+            else:
+                load_pcd_annotation_filename = f"{i:06d}_nonkeyframe.json"
+                load_annotation_ending = os.path.join('nonkeyframes', load_pcd_annotation_filename)
 
-                if manual_boxes:  # This checks if the list is not empty
-                    print(f"Frame {i}: Loaded {len(manual_boxes)} manual annotations. Augmenting GT.")
-                    print(manual_boxes)
-                    for box in manual_boxes:
-                        boxes_ego.append(box)
-                        manual_category_name = box.name
-                        numeric_label = category_name_to_learning_id.get(manual_category_name, UNKNOWN_LEARNING_INDEX)
-                        converted_object_category.append(numeric_label)
+            annotation_data_load_path = os.path.join(annotation_base, scene_name, 'annotations',
+                                                     load_annotation_ending)
+            manual_boxes = parse_single_annotation_file(annotation_data_load_path)
+
+            if manual_boxes:  # This checks if the list is not empty
+                print(f"Frame {i}: Loaded {len(manual_boxes)} manual annotations. Augmenting GT.")
+                print(manual_boxes)
+                for box in manual_boxes:
+                    boxes_ego.append(box)
+                    manual_category_name = box.name
+                    numeric_label = category_name_to_learning_id.get(manual_category_name, UNKNOWN_LEARNING_INDEX)
+                    converted_object_category.append(numeric_label)
 
         # Extract object tokens. Each instance token represents a unique object
         #original_object_tokens = [truckscenes.get('sample_annotation', box_token)['instance_token'] for
