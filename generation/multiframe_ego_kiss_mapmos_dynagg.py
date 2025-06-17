@@ -1973,7 +1973,13 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             print(f"The fused sensor pc at frame {i} has the shape: {sensor_fused_pc.points.shape} with no timestamps.")
 
         ##########################################
-        scene_terminal_list = [4]
+        if args.version == 'v1.0-trainval':
+            scene_terminal_list = [4, 68, 69, 70, 203, 205, 206, 241, 272, 273, 423, 492, 597]
+        elif args.version == 'v1.0-test':
+            scene_terminal_list = [3, 114, 115, 116]
+
+        ################################# Uncomment if you need to save pointclouds for annotation ###########################
+
         """if indice in scene_terminal_list:
             annotation_base = os.path.join(data_root, 'annotation')
             # Format the filename with leading zeros to maintain order (e.g., 000000.pcd, 000001.pcd)
@@ -1981,12 +1987,13 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             if sample['is_key_frame']:
                 output_pcd_filename = f"{i:06d}_keyframe.pcd"
                 annotation_data_save_path = os.path.join(annotation_base, scene_name, 'pointclouds', output_pcd_filename)
+            else:
+                output_pcd_filename = f"{i:06d}_nonkeyframe.pcd"
+                annotation_data_save_path = os.path.join(annotation_base, scene_name, 'pointclouds', 'nonkeyframes', output_pcd_filename)
 
-                # Save the raw fused point cloud before any filtering
-                # We use .points.T to get the (N, features) shape
-                save_pointcloud_for_annotation(sensor_fused_pc.points.T, annotation_data_save_path)
-            #else:
-                # output_pcd_filename = f"{i:06d}_nonkeyframe.pcd"""
+            # Save the raw fused point cloud before any filtering
+            # We use .points.T to get the (N, features) shape
+            save_pointcloud_for_annotation(sensor_fused_pc.points.T, annotation_data_save_path)"""
 
 
         ########### get boxes #####################
@@ -2051,7 +2058,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                 manual_token = f"manual_{box.name}"
                 object_tokens.append(manual_token)
 
-        print(object_tokens)
+        # print(object_tokens)
 
         ############################# get object categories ##########################
         """converted_object_category = []  # Initialize empty list
@@ -4031,6 +4038,7 @@ if __name__ == '__main__':
                        default=850)  # end indice, default: 850, determines range of sequences to process
     parse.add_argument('--dataroot', type=str,
                        default='./data/truckscenes/')  # data root path, default: "./data/truckScenes
+    parse.add_argument('--version', type=str, default='v1.0-trainval')
     parse.add_argument('--trucksc_val_list', type=str,
                        default='./truckscenes_val_list.txt')  # text file containing validation scene tokens, default: "./truckscenes_val_list.txt"
     parse.add_argument('--label_mapping', type=str,
@@ -4088,7 +4096,7 @@ if __name__ == '__main__':
         file.close()
 
         # Load the truckScenes dataset
-        truckscenes = TruckScenes(version='v1.0-trainval',
+        truckscenes = TruckScenes(version=args.version,
                                   dataroot=args.dataroot,
                                   verbose=True)  # verbose True to print informational messages
         train_scenes = splits.train  # train_scenes and val_scenes contain the scene tokens for the training and validation splits
