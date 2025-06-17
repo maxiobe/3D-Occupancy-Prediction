@@ -135,11 +135,16 @@ def main():
     # --- Configuration ---
     dataroot = '/home/max/ssd/Masterarbeit/TruckScenes/trainval/v1.0-trainval'
     output_dir_base = '/home/max/ssd/Masterarbeit/TruckScenes/trainval/v1.0-trainval/annotation'
+    version = 'v1.0-trainval'
 
-    trucksc = TruckScenes(version='v1.0-trainval', dataroot=dataroot, verbose=True)
+    #dataroot = '/home/max/ssd/Masterarbeit/TruckScenes/test/v1.0-test'
+    #output_dir_base = '/home/max/ssd/Masterarbeit/TruckScenes/test/v1.0-test/annotation'
+    #version = 'v1.0-test'
+
+    trucksc = TruckScenes(version=version, dataroot=dataroot, verbose=True)
 
     # You can loop through scenes here, for now we do scene 0
-    scene_idx = 4
+    scene_idx = 423
     my_scene = trucksc.scene[scene_idx]
     scene_name = my_scene['name']
     first_sample_token = my_scene['first_sample_token']
@@ -252,7 +257,7 @@ def main():
     for i, frame_dict in enumerate(tqdm(sample_list, desc="Saving JSON files")):
         output_filepath = os.path.join(output_scene_dir, f"{i:06d}_nonkeyframe.json")
 
-        if frame_dict['manual_boxes']:
+        if not frame_dict['is_key_frame'] and frame_dict['manual_boxes']:
             save_boxes_to_json(output_filepath, pcd_base_dir, i, frame_dict['manual_boxes'])
 
     print(f"\n✅ Done! Interpolated annotations saved to: {output_scene_dir}")
