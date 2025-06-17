@@ -407,10 +407,11 @@ def get_images(trucksc, my_sample, sensor):
     return img
 
 
-def main(trucksc):
+def main(trucksc, testset=False):
     sensors = ['LIDAR_LEFT', 'LIDAR_RIGHT', 'LIDAR_TOP_FRONT', 'LIDAR_TOP_LEFT', 'LIDAR_TOP_RIGHT', 'LIDAR_REAR']
-    my_scene = trucksc.scene[4]
+    my_scene = trucksc.scene[423]
     scene_name = my_scene['name']
+    print(f"\n--- Scene '{scene_name}' ---")
 
     first_sample_token = my_scene['first_sample_token']
     my_sample = trucksc.get('sample', first_sample_token)
@@ -434,7 +435,7 @@ def main(trucksc):
             print("  No valid boxes to display dimensions for in this sample.")
         print("----------------------")
 
-        if not boxes:
+        if not boxes and not testset:
             print(
                 "No boxes found or processed successfully. Skipping attribute extraction and visualization for this sample.")
             # Proceed to the next sample
@@ -476,23 +477,27 @@ def main(trucksc):
 
         pc_fused_ego = sensor_fused_pc.points.T
 
-        camera = 'CAMERA_LEFT_FRONT'
+        camera = 'CAMERA_RIGHT_FRONT'
 
         images = get_images(trucksc, my_sample, camera)
 
         plt.figure(figsize=(12, 8))  # Size in inches (12x8 inches, adjust as needed)
         plt.imshow(images)
-        plt.title("Left Front Camera Image", fontsize=16)
+        plt.title(f"Left Front Camera Image {sample_idx}", fontsize=16)
         plt.axis('off')
         plt.tight_layout()
         plt.show()
 
-        camera = 'CAMERA_LEFT_BACK'
+        camera = 'CAMERA_RIGHT_BACK'
+        #camera = 'CAMERA_RIGHT_FRONT'
         images_2 = get_images(trucksc, my_sample, camera)
 
         plt.figure(figsize=(12, 8))  # Size in inches (12x8 inches, adjust as needed)
         plt.imshow(images_2)
-        plt.title("Left Back Camera Image", fontsize=16)
+        # plt.title("Left Back Camera Image", fontsize=16)
+        # plt.title("Right Back Camera Image", fontsize=16)
+        plt.axis('off')
+        plt.title(f"Right Front Camera Image {sample_idx}", fontsize=16)
         plt.axis('off')
         plt.tight_layout()
         plt.show()
@@ -515,7 +520,10 @@ if __name__ == '__main__':
                               dataroot='/home/max/ssd/Masterarbeit/TruckScenes/trainval/v1.0-trainval',
                               verbose=True)
 
-    main(truckscenes)
+    #truckscenes = TruckScenes(version='v1.0-test',
+     #                              dataroot='/home/max/ssd/Masterarbeit/TruckScenes/test/v1.0-test',
+      #                             verbose=True)
+    main(truckscenes, testset=True)
 
     changed_count = 0
     changed_scenes_list = []
