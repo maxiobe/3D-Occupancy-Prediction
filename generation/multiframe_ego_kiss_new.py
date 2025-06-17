@@ -4,7 +4,7 @@ import pdb
 import time
 import yaml
 import torch
-import chamfer
+# import chamfer
 import mmcv
 import numpy as np
 from truckscenes.truckscenes import TruckScenes  ### Truckscenes
@@ -3507,7 +3507,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                         show_unobserved=False
                     )
 
-                run_cpu_comparison_lidar = True
+                run_cpu_comparison_lidar = False
                 if run_cpu_comparison_lidar:
                     if isinstance(voxel_size, (int, float)):
                         voxel_size_masks = [voxel_size, voxel_size, voxel_size]
@@ -3618,7 +3618,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                         show_unobserved=False  # Shows what's NOT camera visible as unobserved
                     )
 
-                run_cpu_comparison_camera = True
+                run_cpu_comparison_camera = False
                 if run_cpu_comparison_camera:
                     print(f"Calculating camera visibility for cameras (CPU): {cameras}")
 
