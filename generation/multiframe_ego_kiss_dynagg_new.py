@@ -4,9 +4,11 @@ import pdb
 import time
 import yaml
 import torch
+import torch.nn.functional as F
 # import chamfer
 import mmcv
 import numpy as np
+from pytorch3d.ops.iou_box3d import box3d_overlap
 from truckscenes.truckscenes import TruckScenes  ### Truckscenes
 from truckscenes.utils import splits  ### Truckscenes
 from tqdm import tqdm
@@ -1919,71 +1921,57 @@ def calculate_3d_iou_monte_carlo(box1_params, box2_params, num_samples=3000):
 
     return iou
 
+
+# MODIFIED Function to match the [width, length, height] convention
 def convert_boxes_to_corners(boxes: torch.Tensor) -> torch.Tensor:
-    """
-    Converts parameterized 3D boxes to the 8 corner coordinates.
+  """
+  Converts parameterized 3D boxes to the 8 corner coordinates.
+  MODIFIED: Assumes input dimensions are [width, length, height] and maps them
+  directly to the box's local X, Y, and Z axes respectively.
 
-    Args:
-        boxes (torch.Tensor): A tensor of shape (N, 7) with parameters
-                              [cx, cy, cz, w, l, h, yaw_rad].
+  Args:
+      boxes (torch.Tensor): A tensor of shape (N, 7) with parameters
+                            [cx, cy, cz, w, l, h, yaw_rad].
 
-    Returns:
-        torch.Tensor: A tensor of shape (N, 8, 3) representing the box corners.
-    """
-    # Check for correct input shape
-    if boxes.ndim != 2 or boxes.shape[1] != 7:
-        raise ValueError("Input tensor must be of shape (N, 7).")
+  Returns:
+      torch.Tensor: A tensor of shape (N, 8, 3) representing the box corners.
+  """
+  if boxes.ndim != 2 or boxes.shape[1] != 7:
+    raise ValueError("Input tensor must be of shape (N, 7).")
 
-    # Pytorch3D's convention for the canonical box is a unit cube centered at the origin
-    # Its vertices are indexed as shown in the box3d_overlap docstring.
-    # We create these 8 corners in a [-0.5, 0.5] range.
-    device = boxes.device
-    corners_norm = torch.tensor([
-        [-0.5, -0.5, -0.5],
-        [+0.5, -0.5, -0.5],
-        [+0.5, +0.5, -0.5],
-        [-0.5, +0.5, -0.5],
-        [-0.5, -0.5, +0.5],
-        [+0.5, -0.5, +0.5],
-        [+0.5, +0.5, +0.5],
-        [-0.5, +0.5, +0.5],
-    ], dtype=torch.float32, device=device)
+  device = boxes.device
+  corners_norm = torch.tensor([
+    [-0.5, -0.5, -0.5], [+0.5, -0.5, -0.5], [+0.5, +0.5, -0.5], [-0.5, +0.5, -0.5],
+    [-0.5, -0.5, +0.5], [+0.5, -0.5, +0.5], [+0.5, +0.5, +0.5], [-0.5, +0.5, +0.5],
+  ], dtype=torch.float32, device=device)
 
-    # Separate parameters
-    centers = boxes[:, 0:3]
-    # IMPORTANT: Your format is [w, l, h], but standard 3D representation is often
-    # [length(x), width(y), height(z)]. We assume dims are [w, l, h] from your code
-    # and map them correctly to x, y, z axes. Let's say l->x, w->y, h->z.
-    dims_wl_h = boxes[:, 3:6]
-    dims_lw_h = dims_wl_h[:, [1, 0, 2]] # Reorder to [l, w, h] for scaling x, y, z
-    yaws = boxes[:, 6]
+  centers = boxes[:, 0:3]
 
-    # --- Create Rotation Matrices from Yaw ---
-    cos_yaws = torch.cos(yaws)
-    sin_yaws = torch.sin(yaws)
-    # Create rotation matrices for Z-axis rotation
-    zeros = torch.zeros_like(cos_yaws)
-    ones = torch.ones_like(cos_yaws)
-    rot_matrices = torch.stack([
-        cos_yaws, -sin_yaws, zeros,
-        sin_yaws, cos_yaws, zeros,
-        zeros, zeros, ones
-    ], dim=1).reshape(-1, 3, 3) # Shape: (N, 3, 3)
+  # --- FIX: Use dimensions directly without reordering ---
+  # The input tensor's dimensions are [width, length, height].
+  # We will use these to scale the x, y, and z axes of the canonical box.
+  dims_wlh = boxes[:, 3:6]
 
-    # --- Transform Corners ---
-    # 1. Scale canonical corners by dimensions
-    # Unsqueeze dims to (N, 1, 3) to broadcast over the 8 corners (8, 3)
-    scaled_corners = corners_norm.unsqueeze(0) * dims_lw_h.unsqueeze(1) # (N, 8, 3)
+  yaws = boxes[:, 6]
 
-    # 2. Rotate scaled corners
-    # (N, 8, 3) @ (N, 3, 3) -> transpose rot_matrices for correct multiplication
-    rotated_corners = torch.bmm(scaled_corners, rot_matrices.transpose(1, 2))
+  # Create rotation matrices from yaw
+  cos_yaws, sin_yaws = torch.cos(yaws), torch.sin(yaws)
+  zeros, ones = torch.zeros_like(cos_yaws), torch.ones_like(cos_yaws)
+  rot_matrices = torch.stack([
+    cos_yaws, -sin_yaws, zeros,
+    sin_yaws, cos_yaws, zeros,
+    zeros, zeros, ones
+  ], dim=1).reshape(-1, 3, 3)
 
-    # 3. Translate corners to final position
-    # Unsqueeze centers to (N, 1, 3) to broadcast addition
-    final_corners = rotated_corners + centers.unsqueeze(1)
+  # --- FIX: Scale the corners using the original [w, l, h] dimensions ---
+  # This now scales the box's local X-axis by width, Y-axis by length, and Z-axis by height.
+  scaled_corners = corners_norm.unsqueeze(0) * dims_wlh.unsqueeze(1)
 
-    return final_corners
+  # Rotate and translate corners
+  rotated_corners = torch.bmm(scaled_corners, rot_matrices.transpose(1, 2))
+  final_corners = rotated_corners + centers.unsqueeze(1)
+
+  return final_corners
 
 def calculate_3d_iou_pytorch3d(boxes1_params: np.ndarray, boxes2_params: np.ndarray) -> np.ndarray:
     """
@@ -2063,6 +2051,7 @@ def get_object_overlap_signature(frame_data, target_obj_idx_in_frame, iou_min_th
 
         # Calculate the 3D IoU (using the Monte Carlo function from before)
         iou = calculate_3d_iou_monte_carlo(target_obj_bbox_params, other_obj_bbox_params)
+        #iou = calculate_3d_iou_pytorch3d(target_obj_bbox_params, other_obj_bbox_params)[0]
 
         # If the overlap is significant, add it to our list
         if iou > iou_min_threshold:
@@ -2077,6 +2066,94 @@ def get_object_overlap_signature(frame_data, target_obj_idx_in_frame, iou_min_th
 
     return overlaps
 
+
+def get_object_overlap_signature_COMPARISON(frame_data, target_obj_idx_in_frame, iou_min_threshold=0.01):
+    """
+    TEMPORARY a_iou_comparison_function.
+    Calculates IoU using both Monte Carlo and PyTorch3D methods for side-by-side comparison
+    and prints the results. This is intentionally not batched for easy comparison.
+    """
+    # --- Using the EXPANDED boxes as requested ---
+    # This is frame_data['gt_bbox_3d'] from your main loop
+    all_boxes_in_frame = frame_data['gt_bbox_3d']
+    target_obj_bbox_params = all_boxes_in_frame[target_obj_idx_in_frame]
+
+    # Get the token for logging
+    target_token_short = frame_data['object_tokens'][target_obj_idx_in_frame].split('-')[0]
+
+    overlaps = []
+    print(f"\n--- IoU Comparison for Target Box: {target_token_short}... ---")
+
+    for other_obj_idx, other_obj_token in enumerate(frame_data['object_tokens']):
+        if other_obj_idx == target_obj_idx_in_frame:
+            continue
+
+        other_obj_bbox_params = all_boxes_in_frame[other_obj_idx]
+
+        # --- 1. Calculate IoU with Monte Carlo method ---
+        iou_mc = calculate_3d_iou_monte_carlo(target_obj_bbox_params, other_obj_bbox_params)
+
+        # --- 2. Calculate IoU with exact PyTorch3D method ---
+        # Reshape inputs from (7,) to (1, 7) for the batch-based function
+        target_for_pt3d = target_obj_bbox_params.reshape(1, 7)
+        other_for_pt3d = other_obj_bbox_params.reshape(1, 7)
+        # The result is a (1, 1) matrix, so we get the single value
+        iou_pt3d = calculate_3d_iou_pytorch3d(target_for_pt3d, other_for_pt3d)[0, 0]
+
+        # --- 3. Compare and build signature ---
+        # We will use the more accurate pt3d result for the actual signature
+        iou = iou_pt3d
+
+        # Only print and process if there is a significant overlap
+        if iou > iou_min_threshold or iou_mc > iou_min_threshold:
+            other_token_short = other_obj_token.split('-')[0]
+            print(
+                f"  vs {other_token_short:<8} | Monte Carlo IoU: {iou_mc:.6f} | PyTorch3D (Exact) IoU: {iou_pt3d:.6f}")
+
+            if iou > iou_min_threshold:
+                relative_yaw = calculate_relative_yaw(target_obj_bbox_params, other_obj_bbox_params)
+                other_obj_category = frame_data['converted_object_category'][other_obj_idx]
+                overlaps.append((iou, other_obj_token, other_obj_category, relative_yaw))
+
+    overlaps.sort(key=lambda x: x[1])
+    return overlaps
+
+
+def get_object_overlap_signature_BATCH(frame_data, target_obj_idx_in_frame, iou_min_threshold=0.01):
+    """
+    FINAL VERSION.
+    Calculates a robust overlap signature for the target object in the given frame
+    using a single, efficient batch call to the PyTorch3D IoU function.
+    """
+    # --- Using the EXPANDED boxes as requested ---
+    # This is frame_data['gt_bbox_3d'] from your main loop
+    all_boxes_in_frame = frame_data['gt_bbox_3d']
+
+    # Isolate the single target box for the batch call
+    target_box = all_boxes_in_frame[target_obj_idx_in_frame:target_obj_idx_in_frame + 1]  # Shape: (1, 7)
+
+    # --- Perform ONE batch calculation for maximum efficiency ---
+    # This computes IoU between the target box and all boxes, returning a (1, M) matrix.
+    iou_row = calculate_3d_iou_pytorch3d(target_box, all_boxes_in_frame)[0]
+
+    overlaps = []
+    for other_obj_idx, other_obj_token in enumerate(frame_data['object_tokens']):
+        if other_obj_idx == target_obj_idx_in_frame:
+            continue
+
+        # Look up the pre-calculated IoU
+        iou = iou_row[other_obj_idx]
+
+        if iou > iou_min_threshold:
+            target_obj_bbox_params = all_boxes_in_frame[target_obj_idx_in_frame]
+            other_obj_bbox_params = all_boxes_in_frame[other_obj_idx]
+
+            relative_yaw = calculate_relative_yaw(target_obj_bbox_params, other_obj_bbox_params)
+            other_obj_category = frame_data['converted_object_category'][other_obj_idx]
+            overlaps.append((iou, other_obj_token, other_obj_category, relative_yaw))
+
+    overlaps.sort(key=lambda x: x[1])
+    return overlaps
 
 def compare_signatures(sig1, sig2,
                        iou_strong_threshold=0.05,
@@ -3830,7 +3907,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
             # --- 1. Get the interaction signature for the object in THIS keyframe ---
             # We pass `frame_dict` which is `dict_list[i]`
-            signature_at_keyframe_i = get_object_overlap_signature(frame_dict, keyframe_obj_idx)
+            signature_at_keyframe_i = get_object_overlap_signature_BATCH(frame_dict, keyframe_obj_idx)
 
             if signature_at_keyframe_i:
                 # Create a temporary map to resolve tokens to names for the signature string
@@ -3853,7 +3930,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                     candidate_obj_idx = candidate_frame_data['object_tokens'].index(current_object_token)
 
                     # Get the signature of the object in the candidate frame
-                    signature_at_candidate_frame = get_object_overlap_signature(candidate_frame_data, candidate_obj_idx)
+                    signature_at_candidate_frame = get_object_overlap_signature_BATCH(candidate_frame_data, candidate_obj_idx)
 
                     # Get the bounding box parameters for both the keyframe and candidate frame object
                     bbox_params_keyframe = current_keyframe_gt_bboxes_unmodified[keyframe_obj_idx]

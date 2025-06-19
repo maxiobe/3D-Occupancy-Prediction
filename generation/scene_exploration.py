@@ -37,7 +37,7 @@ if __name__ == '__main__':
         print()
 
     """# scene_list = [3, 46, 47, 53, 54, 107, 108, 109, 110, 114, 115, 116]
-    scene_list = [114]
+    scene_list = [46, 47, 107, 108, 109, 110]
     for scene_id in scene_list:
         print(f"Rendering single scene {scene_id}...")
         my_scene = truckscenes_test.scene[scene_id]
@@ -46,7 +46,8 @@ if __name__ == '__main__':
 
 
     # scene_list = [1, 2, 4, 44, 45, 46, 64, 65, 66, 68, 69, 70, 139, 140, 203, 204, 205, 206, 239, 240, 241, 257, 258, 259, 260, 272, 273, 419, 420, 421, 423, 447, 448, 449, 450, 451, 452, 453, 454, 455, 457, 458, 459, 460, 461, 462, 463, 492, 517, 518, 519, 520, 597]
-    scene_list = [423]
+    # scene_list = [2, 65, 139, 140, 240, 419, 420, 421, 447, 448, 449, 450, 451, 452, 454, 455, 457, 458, 459, 460, 461, 462, 463, 517, 518, 519, 520]
+    scene_list = [5]
     for scene_id in scene_list:
         print(f"Rendering single scene {scene_id}...")
         my_scene = truckscenes.scene[scene_id]
