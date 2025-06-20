@@ -36,6 +36,7 @@ import json
 
 from custom_datasets import InMemoryDataset, InMemoryDatasetMapMOS
 import math
+from shapely.geometry import Polygon, Point, MultiPolygon
 
 from numba import njit, prange, cuda
 from mapmos.pipeline import MapMOSPipeline
@@ -2157,7 +2158,7 @@ def get_object_overlap_signature_BATCH(frame_data, target_obj_idx_in_frame, iou_
 
 def compare_signatures(sig1, sig2,
                        iou_strong_threshold=0.05,
-                       iou_strong_tolerance=0.05,
+                       iou_strong_tolerance=0.01,
                        yaw_tolerance_rad=0.1):
     """
     Compares two overlap signatures with tiered logic for weak and strong overlaps.
@@ -2202,6 +2203,77 @@ def compare_signatures(sig1, sig2,
     # If all checks passed, the signatures are a match
     return True
 
+
+# --- 2. NEW CLASS-BASED SIGNATURE COMPARISON FUNCTION ---
+def compare_signatures_class_based(sig1, target_cat1, sig2, target_cat2, thresholds_config):
+    """
+    Compares two overlap signatures using class-based, dynamic thresholds.
+
+    Args:
+        sig1 (list): Signature of the first object.
+        target_cat1 (int): Class ID of the first target object.
+        sig2 (list): Signature of the second object.
+        target_cat2 (int): Class ID of the second target object.
+        thresholds_config (dict): The configuration dictionary with class-based thresholds.
+
+    Returns:
+        bool: True if the signatures are a match based on class-specific rules.
+    """
+    # 1. Check if the target objects are even the same class
+    if target_cat1 != target_cat2:
+        return False
+
+    # 2. Check for same number of interacting objects
+    if len(sig1) != len(sig2):
+        return False
+
+    # 3. Handle the isolated case
+    if not sig1:
+        return True
+
+    # 4. Iterate and compare each corresponding interaction
+    for i in range(len(sig1)):
+        iou1, token1, neighbor_cat1, yaw1 = sig1[i]
+        iou2, token2, neighbor_cat2, yaw2 = sig2[i]
+
+        # 4a. Tokens and neighbor classes must match
+        if token1 != token2 or neighbor_cat1 != neighbor_cat2:
+            return False
+
+        # --- DYNAMIC THRESHOLD LOOKUP ---
+        # Create the key for the dictionary lookup
+        class_pair_key = frozenset({target_cat1, neighbor_cat1})
+
+        # Get the specific thresholds for this pair, falling back to 'default' if not found
+        params = thresholds_config.get(class_pair_key, thresholds_config['default'])
+
+        iou_strong_threshold = params['iou_strong_threshold']
+        iou_strong_tolerance = params['iou_strong_tolerance']
+        yaw_tolerance_rad = params['yaw_tolerance_rad']
+        # --- END DYNAMIC LOOKUP ---
+
+        # 4b. Relative yaws must be similar (using the dynamic tolerance)
+        if abs(yaw1 - yaw2) > yaw_tolerance_rad:
+            return False
+
+        # 4c. Tiered IoU Comparison Logic (using the dynamic thresholds)
+        is_strong1 = iou1 > iou_strong_threshold
+        is_strong2 = iou2 > iou_strong_threshold
+
+        if is_strong1 and is_strong2:
+            # BOTH are strong overlaps. Compare their values with the dynamic tolerance.
+            if abs(iou1 - iou2) > iou_strong_tolerance:
+                return False
+        elif not is_strong1 and not is_strong2:
+            # BOTH are weak overlaps. This is a match.
+            pass
+        else:
+            # One is strong and one is weak. This is a clear mismatch in state.
+            return False
+
+    # If all checks passed for all interactions, the signatures are a match
+    return True
+
 def are_box_sizes_similar(box1_params, box2_params, volume_ratio_tolerance=1.05):
     """
     Checks if the dimensions of two bounding boxes are similar based on their volume ratio.
@@ -2240,7 +2312,7 @@ def are_box_sizes_similar(box1_params, box2_params, volume_ratio_tolerance=1.05)
 
 
 def is_point_centroid_z_similar(points1, points2, category_id,
-                                target_category_id, z_tolerance=0.5):
+                                target_category_id, z_tolerance=0.2):
     """
     Checks if the Z-centroid of two point clouds are similar, but only for a specific category.
     This is highly effective for vehicles like forklifts where the point cloud's center of mass
@@ -2379,6 +2451,52 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
     # Define the learning ID for the category we want to apply the Z-centroid check to
     OTHER_VEHICLE_LEARNING_ID = category_name_to_learning_id.get('vehicle.other', 13)
+
+    TRUCK_ID = category_name_to_learning_id.get('truck', 10)
+    TRAILER_ID = category_name_to_learning_id.get('trailer', 9)
+    CAR_ID = category_name_to_learning_id.get('car', 10)
+    OTHER_VEHICLE_ID = category_name_to_learning_id.get('other', 13)
+    BARRIER_ID = category_name_to_learning_id.get('barrier', 10)
+    PEDESTRIAN_ID = category_name_to_learning_id.get('pedestrian', 10)
+
+    CLASS_BASED_THRESHOLDS = {
+        # --- Interaction: truck <-> trailer ---
+        # This is a tight, expected interaction. We use a high threshold.
+        frozenset({TRUCK_ID, TRAILER_ID}): {
+            'iou_strong_threshold': 0.10,
+            'iou_strong_tolerance': 0.10,  # Allow a larger difference since they are large objects
+            'yaw_tolerance_rad': 0.1
+        },
+        # --- Interaction: car <-> car ---
+        # Two cars shouldn't have a high IoU unless they are crashing.
+        frozenset({CAR_ID, CAR_ID}): {
+            'iou_strong_threshold': 0.05,
+            'iou_strong_tolerance': 0.05,
+            'yaw_tolerance_rad': 0.2
+        },
+        # --- Interaction: truck <-> other_vehicle ---
+        # Based on your logs, this seems to be an incidental, "nearby" interaction.
+        # We can use a lower threshold to still capture it in the signature,
+        # but the logic will correctly classify it as 'weak'.
+        frozenset({TRUCK_ID, OTHER_VEHICLE_ID}): {
+            'iou_strong_threshold': 0.01,
+            'iou_strong_tolerance': 0.001,
+            'yaw_tolerance_rad': 0.2
+        },
+
+        frozenset({TRAILER_ID, OTHER_VEHICLE_ID}): {
+            'iou_strong_threshold': 0.01,
+            'iou_strong_tolerance': 0.001,
+            'yaw_tolerance_rad': 0.2
+        },
+        # --- DEFAULT FALLBACK ---
+        # This is crucial for any pair you haven't explicitly defined.
+        'default': {
+            'iou_strong_threshold': 0.05,
+            'iou_strong_tolerance': 0.01,
+            'yaw_tolerance_rad': 0.15
+        }
+    }
 
     lidar_entries = load_lidar_entries(trucksc=trucksc, sample=my_sample, lidar_sensors=sensors)
     print(f"Number of lidar entries: {len(lidar_entries)}")
@@ -3916,7 +4034,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                     for tok, cat_id in zip(current_keyframe_object_tokens, current_keyframe_object_categories)
                 }
                 # Now build the descriptive signature string
-                sig_str = ", ".join([f"({iou:.2f}, {learning_id_to_name.get(cat_id, '?')}, {yaw:.2f} rad)"
+                sig_str = ", ".join([f"({iou:.4f}, {learning_id_to_name.get(cat_id, '?')}, {yaw:.4f} rad)"
                                      for iou, tok, cat_id, yaw in signature_at_keyframe_i])
                 print(f"    Signature for '{class_name}': [{sig_str}]")
 
@@ -3929,23 +4047,30 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                 if current_object_token in candidate_frame_data['object_tokens']:
                     candidate_obj_idx = candidate_frame_data['object_tokens'].index(current_object_token)
 
-                    # Get the signature of the object in the candidate frame
-                    signature_at_candidate_frame = get_object_overlap_signature_BATCH(candidate_frame_data, candidate_obj_idx)
+                    # Get the category IDs for the target object in both the keyframe and candidate frame
+                    category_id_keyframe = current_keyframe_object_categories[keyframe_obj_idx]
+                    category_id_candidate = candidate_frame_data['converted_object_category'][candidate_obj_idx]
+
+                    # Get the signatures for both
+                    signature_at_candidate_frame = get_object_overlap_signature_BATCH(candidate_frame_data,
+                                                                                     candidate_obj_idx)
 
                     # Get the bounding box parameters for both the keyframe and candidate frame object
                     bbox_params_keyframe = current_keyframe_gt_bboxes_unmodified[keyframe_obj_idx]
                     bbox_params_candidate = candidate_frame_data['gt_bbox_3d_unmodified'][candidate_obj_idx]
-
-                    category_id_keyframe = current_keyframe_object_categories[keyframe_obj_idx]
                     points_keyframe = frame_dict['object_points_list'][keyframe_obj_idx]
                     points_candidate = candidate_frame_data['object_points_list'][candidate_obj_idx]
 
                     # Compare the keyframe's signature with the candidate's signature
-                    if compare_signatures(signature_at_keyframe_i, signature_at_candidate_frame) and \
-                            are_box_sizes_similar(bbox_params_keyframe, bbox_params_candidate) and \
+                    if (compare_signatures_class_based(
+                            signature_at_keyframe_i, category_id_keyframe,
+                            signature_at_candidate_frame, category_id_candidate,
+                            CLASS_BASED_THRESHOLDS
+                    ) and
+                            are_box_sizes_similar(bbox_params_keyframe, bbox_params_candidate) and
                             is_point_centroid_z_similar(points_keyframe, points_candidate,
-                                                        category_id_keyframe, OTHER_VEHICLE_LEARNING_ID,
-                                                        z_tolerance=0.5):
+                                                        category_id_keyframe, OTHER_VEHICLE_ID,
+                                                        z_tolerance=0.5)):
                         # Contexts match! Get the points from this candidate frame.
                         obj_points_in_candidate = candidate_frame_data['object_points_list'][candidate_obj_idx]
                         obj_sids_in_candidate = candidate_frame_data['object_points_list_sensor_ids'][candidate_obj_idx]
