@@ -409,7 +409,7 @@ def get_images(trucksc, my_sample, sensor):
 
 def main(trucksc, testset=False):
     sensors = ['LIDAR_LEFT', 'LIDAR_RIGHT', 'LIDAR_TOP_FRONT', 'LIDAR_TOP_LEFT', 'LIDAR_TOP_RIGHT', 'LIDAR_REAR']
-    my_scene = trucksc.scene[423]
+    my_scene = trucksc.scene[0]
     scene_name = my_scene['name']
     print(f"\n--- Scene '{scene_name}' ---")
 

@@ -13,20 +13,20 @@
 
 # Voxel parameters
 'voxel_size': 0.2 #0.4 # 0.5
-'occ_size':  [200, 200, 150]
+'occ_size':  [400, 400, 125]
 
 # Parameters for ranges
 # 'self_range': [3.0, 3.0, 3.0]
 'self_range': [-1.5, -1.5, -1.0, 6.3, 1.5, 4.2]
-'pc_range':  [-40, -40, -5, 40, 40, 30]
+'pc_range':  [-40, -40, -5, 40, 40, 20]
 
 # Filtering parameters
 # Filtering statistical outlier removal:
 sor_nb_neighbors: 20
 sor_std_ratio: 3.0
 # Filtering radius outlier removal:
-ror_nb_points: 8
-ror_radius: 0.8
+ror_nb_points: 5
+ror_radius: 0.5
 
 # Aggregate scans over different sensors
 # sensors: ['LIDAR_LEFT']
