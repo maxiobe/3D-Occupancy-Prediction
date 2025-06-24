@@ -1952,6 +1952,7 @@ def convert_boxes_to_corners(boxes: torch.Tensor) -> torch.Tensor:
   # The input tensor's dimensions are [width, length, height].
   # We will use these to scale the x, y, and z axes of the canonical box.
   dims_wlh = boxes[:, 3:6]
+  dims_lwh = dims_wlh[:, [1, 0, 2]]
 
   yaws = boxes[:, 6]
 
@@ -1964,9 +1965,7 @@ def convert_boxes_to_corners(boxes: torch.Tensor) -> torch.Tensor:
     zeros, zeros, ones
   ], dim=1).reshape(-1, 3, 3)
 
-  # --- FIX: Scale the corners using the original [w, l, h] dimensions ---
-  # This now scales the box's local X-axis by width, Y-axis by length, and Z-axis by height.
-  scaled_corners = corners_norm.unsqueeze(0) * dims_wlh.unsqueeze(1)
+  scaled_corners = corners_norm.unsqueeze(0) * dims_lwh.unsqueeze(1)
 
   # Rotate and translate corners
   rotated_corners = torch.bmm(scaled_corners, rot_matrices.transpose(1, 2))
@@ -2017,18 +2016,7 @@ def get_object_overlap_signature(frame_data, target_obj_idx_in_frame, iou_min_th
     Returns:
         list: A sorted list of (float, str) tuples representing the signature.
     """
-    # target_obj_bbox_params = frame_data['gt_bbox_3d'][target_obj_idx_in_frame]
-    # gt_bbox_3d_target = frame_data['gt_bbox_3d_unmodified'][target_obj_idx_in_frame]
-    gt_bbox_3d_target = frame_data['gt_bbox_3d'][target_obj_idx_in_frame]
-
-    """dims = gt_bbox_3d_target[:, 3:6]
-
-    gt_bbox_3d_target[:, 6] += np.pi / 2.
-    gt_bbox_3d_target[:, 2] -= dims[:, 2] / 2.
-    gt_bbox_3d_target[:, 2] -= 0.1
-    gt_bbox_3d_target[:, 3:6] *= 1.1"""
-
-    target_obj_bbox_params = gt_bbox_3d_target.copy()
+    target_obj_bbox_params = frame_data['gt_bbox_3d'][target_obj_idx_in_frame]
 
     # This list will store all significant overlaps
     overlaps = []
@@ -2038,17 +2026,7 @@ def get_object_overlap_signature(frame_data, target_obj_idx_in_frame, iou_min_th
         if other_obj_idx == target_obj_idx_in_frame:
             continue
 
-        # gt_bbox_3d_other_obj = frame_data['gt_bbox_3d_unmodified'][other_obj_idx]
-        gt_bbox_3d_other_obj = frame_data['gt_bbox_3d'][other_obj_idx]
-
-        """dims = gt_bbox_3d_other_obj[:, 3:6]
-
-        gt_bbox_3d_other_obj[:, 6] += np.pi / 2.
-        gt_bbox_3d_other_obj[:, 2] -= dims[:, 2] / 2.
-        gt_bbox_3d_other_obj[:, 2] -= 0.1
-        gt_bbox_3d_other_obj[:, 3:6] *= 1.1"""
-
-        other_obj_bbox_params = gt_bbox_3d_other_obj.copy()
+        other_obj_bbox_params = frame_data['gt_bbox_3d_overlap_enlarged'][other_obj_idx]
 
         # Calculate the 3D IoU (using the Monte Carlo function from before)
         iou = calculate_3d_iou_monte_carlo(target_obj_bbox_params, other_obj_bbox_params)
@@ -2074,9 +2052,8 @@ def get_object_overlap_signature_COMPARISON(frame_data, target_obj_idx_in_frame,
     Calculates IoU using both Monte Carlo and PyTorch3D methods for side-by-side comparison
     and prints the results. This is intentionally not batched for easy comparison.
     """
-    # --- Using the EXPANDED boxes as requested ---
-    # This is frame_data['gt_bbox_3d'] from your main loop
-    all_boxes_in_frame = frame_data['gt_bbox_3d']
+
+    all_boxes_in_frame = frame_data['gt_bbox_3d_overlap_enlarged']
     target_obj_bbox_params = all_boxes_in_frame[target_obj_idx_in_frame]
 
     # Get the token for logging
@@ -2126,9 +2103,7 @@ def get_object_overlap_signature_BATCH(frame_data, target_obj_idx_in_frame, iou_
     Calculates a robust overlap signature for the target object in the given frame
     using a single, efficient batch call to the PyTorch3D IoU function.
     """
-    # --- Using the EXPANDED boxes as requested ---
-    # This is frame_data['gt_bbox_3d'] from your main loop
-    all_boxes_in_frame = frame_data['gt_bbox_3d']
+    all_boxes_in_frame = frame_data['gt_bbox_3d_overlap_enlarged']
 
     # Isolate the single target box for the batch call
     target_box = all_boxes_in_frame[target_obj_idx_in_frame:target_obj_idx_in_frame + 1]  # Shape: (1, 7)
@@ -2368,6 +2343,47 @@ def calculate_relative_yaw(box1_params, box2_params):
 
     return relative_yaw
 
+
+def get_weather_intensity_filter_mask(point_cloud: np.ndarray, weather_condition: str, intensity_thresh: float, distance_thresh: float) -> np.ndarray:
+    """
+    Calculates a boolean mask for lidar intensity filtering in bad weather.
+    For good weather, it returns a mask that keeps all points.
+
+    Args:
+        point_cloud (np.ndarray): The input point cloud (N, D), where D>=4 and column 3 is intensity.
+        weather_condition (str): The weather condition, e.g., 'snow', 'rain'.
+        intensity_thresh (float): The minimum intensity to keep for points within the distance threshold.
+        distance_thresh (float): The distance from ego (origin) within which to apply the intensity filter.
+
+    Returns:
+        np.ndarray: A boolean mask of shape (N,) where True indicates points to keep.
+    """
+    # If the weather is good, we don't filter anything. Return a mask that keeps all points.
+    if weather_condition not in ['snow', 'rain', 'fog']:
+        print(f"No intensity filtering for weather condition '{weather_condition}'.")
+        return np.ones(point_cloud.shape[0], dtype=bool)
+
+    # If the point cloud is empty, return an empty mask.
+    if point_cloud.shape[0] == 0:
+        print("Empty point cloud. Returning empty mask")
+        return np.array([], dtype=bool)
+
+    print(f"Calculating intensity filter for weather condition '{weather_condition}'.")
+
+    # Calculate distance from each point to the ego vehicle (origin 0,0,0 in ego frame)
+    distances_to_ego = np.linalg.norm(point_cloud[:, :3], axis=1)
+
+    # Extract lidar intensity values (assuming it's the 4th column, index 3)
+    pc_lidar_intensities = point_cloud[:, 3]
+
+    # A point is kept if:
+    # 1. It is BEYOND the distance threshold, OR
+    # 2. It is WITHIN the distance threshold AND its intensity is ABOVE the intensity threshold.
+    keep_mask = (distances_to_ego > distance_thresh) | \
+                ((distances_to_ego <= distance_thresh) & (pc_lidar_intensities > intensity_thresh))
+
+    return keep_mask
+
 def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     # Extract necessary parameters from the arguments and configs
     save_path = args.save_path  # Directory where processed data will be saved
@@ -2407,6 +2423,12 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     print(f"Processing scene: {scene_name}")
     scene_description = my_scene['description']
     print(f"Scene description: {scene_description}")
+
+    # find the part that starts with "weather."
+    weather_tag = next(tag for tag in scene_description.split(';') if tag.startswith('weather.'))
+    # split on the dot and take the second piece
+    weather = weather_tag.split('.', 1)[1]
+
     # load the first sample from a scene to start
     first_sample_token = my_scene[
         'first_sample_token']  # access the first sample token: contains token of first frame of the scene
@@ -2665,17 +2687,56 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                                                             3)  # extract dimension width, length, height of each bb
         rots = np.array([b.orientation.yaw_pitch_roll[0]  # extract rotations (yaw angles)
                          for b in boxes_ego]).reshape(-1, 1)
+
+        ########################## Bounding boxes without any modifications ########################
+
         gt_bbox_3d_unmodified = np.concatenate([locs, dims, rots], axis=1).astype(
             np.float32)  # combines location, dimensions and rotation into a 2D array
 
-        gt_bbox_3d = gt_bbox_3d_unmodified.copy()
 
-        gt_bbox_3d[:, 6] += np.pi / 2.  # adjust yaw angles by 90 degrees
-        gt_bbox_3d[:, 2] -= dims[:, 2] / 2.
-        # gt_bbox_3d[:, 2] = gt_bbox_3d[:, 2] - 0.05  # Experiment
-        gt_bbox_3d[:, 2] = gt_bbox_3d[:, 2] - 0.1  # Move the bbox slightly down in the z direction
-        # gt_bbox_3d[:, 3:6] = gt_bbox_3d[:, 3:6] * 1.05 # Experiment
-        gt_bbox_3d[:, 3:6] = gt_bbox_3d[:, 3:6] * 1.2  # Slightly expand the bbox to wrap all object points
+        ############################### Enlarge bounding boxes to extract dynamic points #################
+        percentage_factor = 1.10  # Target increase of 20%
+        max_absolute_increase_m = 0.5  # The maximum total increase for any dimension (e.g., 20cm per side)
+
+        # 1. Calculate the dimensions if extended by the percentage factor
+        dims_extended_by_percentage = dims * percentage_factor
+
+        # 2. Calculate the maximum allowed dimensions based on the absolute cap
+        dims_with_max_absolute_increase = dims + max_absolute_increase_m
+
+        # 3. For each dimension, take the SMALLER of the two options
+        new_dims = np.minimum(dims_extended_by_percentage, dims_with_max_absolute_increase)
+
+        gt_bbox_3d_points_in_boxes_cpu_enlarged = gt_bbox_3d_unmodified.copy()
+
+        gt_bbox_3d_points_in_boxes_cpu_enlarged[:, 6] += np.pi / 2.  # adjust yaw angles by 90 degrees
+        gt_bbox_3d_points_in_boxes_cpu_enlarged[:, 2] -= dims[:, 2] / 2.
+        # gt_bbox_3d_points_in_boxes_cpu_enlarged[:, 2] = gt_bbox_3d_points_in_boxes_cpu_enlarged[:, 2] - 0.1  # Move the bbox slightly down in the z direction
+        gt_bbox_3d_points_in_boxes_cpu_enlarged[:, 3:6] = new_dims
+
+        ########################################### Boxes for calculating IoU later ###################################
+        gt_bbox_3d_overlap_enlarged = gt_bbox_3d_unmodified.copy()
+        gt_bbox_3d_overlap_enlarged[:, 3:6] = new_dims
+
+        ################################################ Bounding box just for filtering dynamic map ###################
+        gt_bbox_3d_points_in_boxes_cpu_max_enlarged = gt_bbox_3d_unmodified.copy()
+
+        dims_filter = dims * 1.15
+
+        width_scale_car = 1.20
+        width_scale_truck = 1.25
+        for index, cat in enumerate(original_object_category_names):
+            if cat == 'vehicle.car':
+                dims_filter[i, 0] = dims[index, 0] * width_scale_car
+            elif cat == 'vehicle.truck':
+                dims_filter[i, 0] = dims[index, 0] * width_scale_truck
+
+
+        gt_bbox_3d_points_in_boxes_cpu_max_enlarged[:, 6] += np.pi / 2.  # adjust yaw angles by 90 degrees
+        gt_bbox_3d_points_in_boxes_cpu_max_enlarged[:, 2] -= dims[:, 2] / 2.
+        # gt_bbox_3d_points_in_boxes_cpu_max_enlarged[:, 2] = gt_bbox_3d_points_in_boxes_cpu_max_enlarged[:, 2] - 0.1  # Move the bbox slightly down in the z direction
+        gt_bbox_3d_points_in_boxes_cpu_max_enlarged[:, 3:6] = dims_filter
+
 
         ############################### Visualize if specified in arguments ###########################################
         # visualize_pointcloud(sensor_fused_pc.points.T, title=f"Fused sensor PC in ego coordinates - Frame {i}")
@@ -2738,15 +2799,96 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
         ############################# cut out movable object points and masks ##########################
         points_in_boxes = points_in_boxes_cpu(torch.from_numpy(sensor_fused_pc.points.T[:, :3][np.newaxis, :, :]),
-                                              torch.from_numpy(gt_bbox_3d[np.newaxis,
+                                              torch.from_numpy(gt_bbox_3d_points_in_boxes_cpu_enlarged[np.newaxis,
                                                                :]))  # use function to identify which points belong to which bounding box
+
+        #################################### Mask for the ego vehicle itself #######################################
+        # Get points from the fused point cloud (transposed for shape [Npoints, 4])
+        points_xyz = sensor_fused_pc.points.T[:, :3]
+
+        # Create a mask for points outside the ego vehicle bounding box
+        # Mask calculation: filters out points that are too close to the vehicle in x, y or z directions
+
+        inside_x = torch.from_numpy(points_xyz[:, 0] >= x_min_self) & torch.from_numpy(points_xyz[:, 0] <= x_max_self)
+        inside_y = torch.from_numpy(points_xyz[:, 1] >= y_min_self) & torch.from_numpy(points_xyz[:, 1] <= y_max_self)
+        inside_z = torch.from_numpy(points_xyz[:, 2] >= z_min_self) & torch.from_numpy(points_xyz[:, 2] <= z_max_self)
+
+        inside_ego_mask = inside_x & inside_y & inside_z
+
+
+        #################################### prepare data for kiss-icp ##############################################
+        VELOCITY_THRESHOLD_M_S = 0.2
+
+        is_box_moving_mask = np.zeros(len(boxes_ego), dtype=bool)
+        annotated_boxes_indices = [idx for idx, box in enumerate(boxes_ego) if box.token is not None]
+        box_annotation_tokens = [boxes_ego[i].token for i in annotated_boxes_indices]
+
+        if box_annotation_tokens:
+            box_velocities = np.array([trucksc.box_velocity(token) for token in box_annotation_tokens])
+            box_speeds = np.linalg.norm(np.nan_to_num(box_velocities, nan=0.0), axis=1)
+            are_annotated_boxes_moving = box_speeds > VELOCITY_THRESHOLD_M_S
+            np.put(is_box_moving_mask, annotated_boxes_indices, are_annotated_boxes_moving)
+
+        points_in_moving_boxes_mask_torch = torch.zeros(sensor_fused_pc.points.shape[1], dtype=torch.bool)
+        if np.any(is_box_moving_mask):
+            points_in_moving_boxes_mask_torch = points_in_boxes[0][:, is_box_moving_mask].any(dim=1)
+
+        # Combine ego (`inside_ego_mask`) and moving points into a single removal mask
+        points_to_remove_mask_torch = inside_ego_mask | points_in_moving_boxes_mask_torch
+
+        # This is the mask to select the initial set of points for ICP
+        initial_keep_for_icp_mask_np = ~points_to_remove_mask_torch.numpy()
+
+        # Create the intermediate point cloud (with ego/dynamic objects removed)
+        pc_for_icp = sensor_fused_pc.points.T[initial_keep_for_icp_mask_np]
+
+        # --- Step 2: Apply conditional intensity filter for bad weather ---
+        # This filter is applied ONLY to the `pc_for_icp` data and only to background points.
+        if args.filter_lidar_intensity and weather in ['snow', 'rain', 'fog']:
+            print(f"Applying special conditional intensity filter to ICP data for weather: '{weather}'...")
+
+            # Identify which points in our current `pc_for_icp` were inside ANY original bounding box.
+            points_in_any_box_mask_np = points_in_boxes[0].any(dim=1).numpy()
+            is_point_in_box_for_icp_pc = points_in_any_box_mask_np[initial_keep_for_icp_mask_np]
+
+            # The points we need to *evaluate* with the filter are those NOT in a box (i.e., background points).
+            background_points_mask = ~is_point_in_box_for_icp_pc
+            background_points_to_filter = pc_for_icp[background_points_mask]
+
+            if background_points_to_filter.shape[0] > 0:
+                # Get the intensity filter mask ONLY for the background points.
+                intensity_keep_mask_for_bg = get_weather_intensity_filter_mask(
+                    point_cloud=background_points_to_filter,
+                    weather_condition=weather,
+                    intensity_thresh=intensity_threshold,
+                    distance_thresh=distance_intensity_threshold
+                )
+
+                # Start with a final mask that keeps all points in `pc_for_icp`.
+                final_keep_mask = np.ones(pc_for_icp.shape[0], dtype=bool)
+
+                # Update the mask: For the locations of the background points,
+                # set their keep status according to the intensity filter result.
+                # Points in boxes remain True (kept) because they are not part of `background_points_mask`.
+                final_keep_mask[background_points_mask] = intensity_keep_mask_for_bg
+
+                # Apply the final, combined mask.
+                num_before = pc_for_icp.shape[0]
+                pc_for_icp = pc_for_icp[final_keep_mask]
+                num_after = pc_for_icp.shape[0]
+                print(
+                    f"  Conditional intensity filter removed {num_before - num_after} background points from ICP data.")
+
+        print(
+            f"Original points for frame: {sensor_fused_pc.points.shape[1]}. Final points for ICP: {pc_for_icp.shape[0]}")
+
 
         num_points = sensor_fused_pc.points.shape[1]
         points_label = np.full((num_points, 1), BACKGROUND_LEARNING_INDEX, dtype=np.uint8)
 
         # Assign object labels to points inside bounding boxes
         # Ensure converted_object_category has the correct mapped labels
-        for box_idx in range(gt_bbox_3d.shape[0]):
+        for box_idx in range(gt_bbox_3d_points_in_boxes_cpu_enlarged.shape[0]):
             # Get the mask for points in the current box
             object_points_mask = points_in_boxes[0][:, box_idx].bool()
             # Get the semantic label for this object type
@@ -2784,18 +2926,6 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         # Get static mask (inverse)
         static_mask = ~dynamic_mask
 
-        # Get points from the fused point cloud (transposed for shape [Npoints, 4])
-        points_xyz = sensor_fused_pc.points.T[:, :3]
-
-        # Create a mask for points outside the ego vehicle bounding box
-        # Mask calculation: filters out points that are too close to the vehicle in x, y or z directions
-
-        inside_x = torch.from_numpy(points_xyz[:, 0] >= x_min_self) & torch.from_numpy(points_xyz[:, 0] <= x_max_self)
-        inside_y = torch.from_numpy(points_xyz[:, 1] >= y_min_self) & torch.from_numpy(points_xyz[:, 1] <= y_max_self)
-        inside_z = torch.from_numpy(points_xyz[:, 2] >= z_min_self) & torch.from_numpy(points_xyz[:, 2] <= z_max_self)
-
-        inside_ego_mask = inside_x & inside_y & inside_z
-
         num_ego_points = inside_ego_mask.sum().item()
         print(f"Number of points on ego vehicle: {num_ego_points}")
 
@@ -2826,6 +2956,39 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         print(
             f"Number of semantic static points extracted: {pc_with_semantic_ego_unfiltered.shape} with sensor_ids {pc_with_semantic_ego_unfiltered_sensors.shape}")
 
+
+        ########################################### Dynamic point filtering #########################################################
+
+        print(f"Filtering static point cloud with max enlarged boxes")
+        points_in_boxes_max_enlarged = points_in_boxes_cpu(torch.from_numpy(pc_ego_unfiltered[:, :3][np.newaxis, :, :]),
+                                              torch.from_numpy(gt_bbox_3d_points_in_boxes_cpu_max_enlarged[np.newaxis,
+                                                               :]))  # use function to identify which points belong to which bounding box
+
+        point_box_mask_max_enlarged = points_in_boxes_max_enlarged[0]  # Remove batch dim: shape (Npoints, Nboxes)
+
+        # Point is dynamic if it falls inside *any* box
+        dynamic_mask_max_enlarged = point_box_mask_max_enlarged.any(dim=-1)  # shape: (Npoints,)
+
+        # Count
+        num_dynamic_points_filter = dynamic_mask_max_enlarged.sum().item()
+        print(f"Number of dynamic points to filter with enlarged box: {num_dynamic_points_filter}")
+
+        # Get static mask (inverse)
+        static_mask_max_enlarged = ~dynamic_mask_max_enlarged
+
+        pc_ego_unfiltered = pc_ego_unfiltered[static_mask_max_enlarged]
+        pc_ego_unfiltered_sensors = pc_ego_unfiltered_sensors[static_mask_max_enlarged]
+
+        print(
+            f"Number of static points extracted: {pc_ego_unfiltered.shape} with sensor_ids {pc_ego_unfiltered_sensors.shape}")
+
+        pc_with_semantic_ego_unfiltered = pc_with_semantic_ego_unfiltered[static_mask_max_enlarged]
+        pc_with_semantic_ego_unfiltered_sensors = pc_with_semantic_ego_unfiltered_sensors[static_mask_max_enlarged]
+        print(
+            f"Number of semantic static points extracted: {pc_with_semantic_ego_unfiltered.shape} with sensor_ids {pc_with_semantic_ego_unfiltered_sensors.shape}")
+
+
+
         ############################### Visualize if specified in arguments ###########################################
         """visualize_pointcloud_bbox(pc_with_semantic_ego_unfiltered,
                                           boxes=boxes_ego,
@@ -2846,47 +3009,27 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
         ########################################## Lidar intensity filtering #######################################
         if args.filter_lidar_intensity:
-            # find the part that starts with "weather."
-            weather_tag = next(tag for tag in scene_description.split(';') if tag.startswith('weather.'))
-            # split on the dot and take the second piece
-            weather = weather_tag.split('.', 1)[1]
+            print(f'Shape of pc_ego before weather filtering: {pc_ego.shape}')
+            intensity_keep_mask_ego = get_weather_intensity_filter_mask(
+                point_cloud=pc_ego,
+                weather_condition=weather,
+                intensity_thresh=intensity_threshold,
+                distance_thresh=distance_intensity_threshold
+            )
 
-            if weather == 'snow' or weather == 'rain' or weather == 'fog':
-                print(
-                    f"Lidar intensity filtering for bad weather: {weather} with intensity {intensity_threshold} and distance threshold {distance_intensity_threshold} metres")
-                print(f'Shape of pc_ego before weather filtering: {pc_ego.shape}')
+            # Apply the mask to both the points and their corresponding sensor IDs
+            pc_ego = pc_ego[intensity_keep_mask_ego]
+            pc_ego_unfiltered_sensors = pc_ego_unfiltered_sensors[intensity_keep_mask_ego]
+            print(f"Shape of pc_ego after weather filtering: {pc_ego.shape}")
 
-                distances_to_ego = np.linalg.norm(pc_ego[:, :3], axis=1)
-
-                pc_lidar_intensities = pc_ego[:, 3]
-
-                filter_keep_mask = (distances_to_ego > distance_intensity_threshold) | \
-                                   ((distances_to_ego <= distance_intensity_threshold) & (
-                                           pc_lidar_intensities > intensity_threshold))
-
-                # intensity_mask = pc_lidar_intensities > intensity_threshold
-                # pc_ego = pc_ego[intensity_mask]
-                # pc_ego_unfiltered_sensors = pc_ego_unfiltered_sensors[intensity_mask]
-                # pc_with_semantic_ego = pc_with_semantic_ego[intensity_mask]
-                # pc_with_semantic_ego_unfiltered_sensors = pc_with_semantic_ego_unfiltered_sensors[intensity_mask]
-
-                pc_ego = pc_ego[filter_keep_mask]
-                pc_ego_unfiltered_sensors = pc_ego_unfiltered_sensors[filter_keep_mask]
-                # pc_with_semantic_ego = pc_with_semantic_ego[filter_keep_mask]
-                # pc_with_semantic_ego_unfiltered_sensors = pc_with_semantic_ego_unfiltered_sensors[filter_keep_mask]
-
-                print(f'Shape of pc_ego after weather filtering: {pc_ego.shape}')
-
-                ################################ Visualize if specified in arguments ##################################
-                if args.vis_lidar_intensity_filtered:
-                    visualize_pointcloud_bbox(pc_ego,
-                                                      boxes=boxes_ego,
-                                                      title=f"Fused filtered static sensor PC + BBoxes + Ego BBox - Frame {i}",
-                                                      self_vehicle_range=self_range,
-                                                      vis_self_vehicle=True)
-                #######################################################################################################
-            else:
-                print(f"No lidar intensity filtering for good weather: {weather}")
+            ################################ Visualize if specified in arguments ##################################
+            if args.vis_lidar_intensity_filtered:
+                visualize_pointcloud_bbox(pc_ego,
+                                                  boxes=boxes_ego,
+                                                  title=f"Fused filtered static sensor PC + BBoxes + Ego BBox - Frame {i}",
+                                                  self_vehicle_range=self_range,
+                                                  vis_self_vehicle=True)
+            #######################################################################################################
         else:
             print(f"No lidar intensity filtering according to arguments")
 
@@ -2979,7 +3122,9 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             "is_key_frame": sample['is_key_frame'],
             "converted_object_category": converted_object_category,
             "boxes_ego": boxes_ego,
-            "gt_bbox_3d": gt_bbox_3d,  # BBox in current frame's ego coords
+            "gt_bbox_3d_points_in_boxes_cpu_max_enlarged": gt_bbox_3d_points_in_boxes_cpu_max_enlarged,
+            "gt_bbox_3d_points_in_boxes_cpu_enlarged": gt_bbox_3d_points_in_boxes_cpu_enlarged,
+            "gt_bbox_3d_overlap_enlarged": gt_bbox_3d_overlap_enlarged,
             "gt_bbox_3d_unmodified": gt_bbox_3d_unmodified,
             "object_tokens": object_tokens,
             "object_points_list": object_points_list,  # Raw object points in current ego frame
@@ -3005,6 +3150,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             # Store originals if your ICP logic needs them (Optional based on full implementation)
             # "original_pc_ego": pc_ego_unfiltered.copy(),
             # "original_pc_with_semantic_ego": pc_with_semantic_ego_unfiltered.copy(),
+            "lidar_pc_for_icp_ego_i": pc_for_icp
         }
 
         # append the dictionary to list
@@ -3188,10 +3334,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             else:
                 print(
                     "MapMOS run completed. Inspect 'mapmos_pipeline_instance' or 'run_output' for results if available.")
-                # For example, the results might be saved to files if save_ply=True,
-                # or accessible via methods on mapmos_pipeline_instance.
 
-            # Now you can iterate through all_frame_predictions
             """for frame_data in all_frame_predictions:
                 scan_idx = frame_data["scan_index"]
                 points = frame_data["points"]
@@ -3288,11 +3431,13 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         log_dir_kiss = osp.join(save_path, scene_name, "kiss_icp_logs")
 
         try:
+            icp_input_pc_list = [frame_dict['lidar_pc_for_icp_ego_i'] for frame_dict in dict_list]
+            print(f"Preparing InMemoryDataset for KISS-ICP with {len(icp_input_pc_list)} pre-filtered scans.")
+
             in_memory_dataset = InMemoryDataset(
-                lidar_scans=raw_pc_list,
+                lidar_scans=icp_input_pc_list, #raw_pc_list,
                 gt_relative_poses=gt_relative_poses_arr,
                 timestamps=lidar_timestamps,
-                # Use a descriptive sequence ID, incorporating scene name if possible
                 sequence_id=f"{scene_name}_icp_run",
                 log_dir=log_dir_kiss
             )
@@ -3965,47 +4110,11 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         object_tokens = frame_dict['object_tokens']
         converted_object_category = frame_dict['converted_object_category']
 
-        ################################################
-        percentage_factor = 1.20  # Target increase of 20%
-        max_absolute_increase_m = 0.4  # The maximum total increase for any dimension (e.g., 20cm per side)
-        # Get the original dimensions [w, l, h]
-        dims = gt_bbox_3d_unmodified[:, 3:6].copy()
-
-        # 1. Calculate the dimensions if extended by the percentage factor
-        dims_extended_by_percentage = dims * percentage_factor
-
-        # 2. Calculate the maximum allowed dimensions based on the absolute cap
-        dims_with_max_absolute_increase = dims + max_absolute_increase_m
-
-        # 3. For each dimension, take the SMALLER of the two options
-        new_dims = np.minimum(dims_extended_by_percentage, dims_with_max_absolute_increase)
-
-        gt_bbox_3d = gt_bbox_3d_unmodified.copy()
-        gt_bbox_3d[:, 3:6] = new_dims
-
-        gt_bbox_3d[:, 6] += np.pi / 2.  # adjust yaw angles by 90 degrees
-        gt_bbox_3d[:, 2] -= dims[:, 2] / 2.
-        # gt_bbox_3d[:, 2] = gt_bbox_3d[:, 2] - 0.05  # Experiment
-        gt_bbox_3d[:, 2] = gt_bbox_3d[:, 2] - 0.1  # Move the bbox slightly down in the z direction
-
-        ################################################
-
-        """# Create a copy to modify
-        gt_bbox_3d = gt_bbox_3d_unmodified.copy()
-
-        dims = gt_bbox_3d[:, 3:6]
-
-        gt_bbox_3d[:, 6] += np.pi / 2.
-        gt_bbox_3d[:, 2] -= dims[:, 2] / 2.
-        gt_bbox_3d[:, 2] -= 0.1
-        gt_bbox_3d[:, 3:6] *= 1.1"""
-
-        rots = gt_bbox_3d[:, 6:7]
-        locs = gt_bbox_3d[:, 0:3]
+        gt_bbox_3d_points_in_boxes_cpu_enlarged_filter = frame_dict['gt_bbox_3d_points_in_boxes_cpu_enlarged']
 
         ################## bbox placement ##############
         current_keyframe_object_tokens = frame_dict['object_tokens']
-        current_keyframe_gt_bboxes_unmodified = frame_dict['gt_bbox_3d_unmodified']
+        current_keyframe_gt_bboxes = frame_dict['gt_bbox_3d_overlap_enlarged']
         current_keyframe_object_categories = frame_dict['converted_object_category']
 
         # These lists will store the final point clouds for dynamic objects for THIS scene
@@ -4056,8 +4165,8 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                                                                                      candidate_obj_idx)
 
                     # Get the bounding box parameters for both the keyframe and candidate frame object
-                    bbox_params_keyframe = current_keyframe_gt_bboxes_unmodified[keyframe_obj_idx]
-                    bbox_params_candidate = candidate_frame_data['gt_bbox_3d_unmodified'][candidate_obj_idx]
+                    bbox_params_keyframe = current_keyframe_gt_bboxes[keyframe_obj_idx]
+                    bbox_params_candidate = candidate_frame_data['gt_bbox_3d_overlap_enlarged'][candidate_obj_idx]
                     points_keyframe = frame_dict['object_points_list'][keyframe_obj_idx]
                     points_candidate = candidate_frame_data['object_points_list'][candidate_obj_idx]
 
@@ -4077,7 +4186,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
                         if obj_points_in_candidate is not None and obj_points_in_candidate.shape[0] > 0:
                             # Canonicalize the points using the candidate frame's bbox parameters
-                            bbox_params_cand = candidate_frame_data['gt_bbox_3d_unmodified'][candidate_obj_idx]
+                            bbox_params_cand = candidate_frame_data['gt_bbox_3d_overlap_enlarged'][candidate_obj_idx]
                             center_cand, yaw_cand = bbox_params_cand[:3], bbox_params_cand[6]
 
                             translated_pts = obj_points_in_candidate[:, :3] - center_cand
@@ -4106,7 +4215,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                 obj_points_in_keyframe = frame_dict['object_points_list'][keyframe_obj_idx]
                 if obj_points_in_keyframe is not None and obj_points_in_keyframe.shape[0] > 0:
                     # Canonicalize points from the current keyframe itself
-                    bbox_params_keyframe = current_keyframe_gt_bboxes_unmodified[keyframe_obj_idx]
+                    bbox_params_keyframe = current_keyframe_gt_bboxes[keyframe_obj_idx]
                     center_key, yaw_key = bbox_params_keyframe[:3], bbox_params_keyframe[6]
                     translated = obj_points_in_keyframe[:, :3] - center_key
                     Rot_key = Rotation.from_euler('z', -yaw_key, degrees=False)
@@ -4116,7 +4225,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             # --- 4. De-canonicalize and store for final scene assembly ---
             if aggregated_canonical_points.shape[0] > 0:
                 # De-canonicalize using the pose from the CURRENT keyframe `i`
-                bbox_params_decanon = current_keyframe_gt_bboxes_unmodified[keyframe_obj_idx]
+                bbox_params_decanon = current_keyframe_gt_bboxes[keyframe_obj_idx]
                 decanon_center, decanon_yaw = bbox_params_decanon[:3], bbox_params_decanon[6]
 
                 Rot_decan = Rotation.from_euler('z', decanon_yaw, degrees=False)
@@ -4125,7 +4234,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                 # Keep track of the sensor IDs for these points
                 sids_for_points = aggregated_canonical_sids
 
-                bbox_for_filtering = gt_bbox_3d[keyframe_obj_idx: keyframe_obj_idx + 1]
+                bbox_for_filtering = gt_bbox_3d_points_in_boxes_cpu_enlarged_filter[keyframe_obj_idx: keyframe_obj_idx + 1]
 
                 original_count = points_in_scene_xyz.shape[0]
 
