@@ -454,28 +454,6 @@ def preprocess(pcd, config):
         normals=True
     )
 
-
-def icp_align(source_np, target_np, init_trans=np.eye(4), voxel_size=0.2):
-    source = o3d.geometry.PointCloud()
-    target = o3d.geometry.PointCloud()
-    source.points = o3d.utility.Vector3dVector(source_np)
-    target.points = o3d.utility.Vector3dVector(target_np)
-
-    source = source.voxel_down_sample(voxel_size)
-    target = target.voxel_down_sample(voxel_size)
-
-    source.estimate_normals()
-    target.estimate_normals()
-
-    criteria = o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=30)
-
-    reg = o3d.pipelines.registration.registration_icp(
-        source, target, 0.5, init_trans,
-        o3d.pipelines.registration.TransformationEstimationPointToPlane(), criteria
-    )
-    return reg.transformation
-
-
 def denoise_pointcloud(pcd: o3d.geometry.PointCloud, filter_mode: str, config: dict,
                        location_msg: str = "point cloud") -> o3d.geometry.PointCloud:
     """
@@ -1855,74 +1833,6 @@ def parse_single_annotation_file(json_filepath):
 
     return boxes_for_this_frame
 
-
-def calculate_3d_iou_monte_carlo(box1_params, box2_params, num_samples=3000):
-    """
-    Calculates the 3D Intersection over Union (IoU) of two oriented bounding boxes
-    using Monte Carlo approximation.
-
-    (Docstring remains the same)
-    """
-    # --- 1. Create Open3D OrientedBoundingBox objects ---
-    # (This part is correct and remains unchanged)
-    center1 = box1_params[:3]
-    extent1 = box1_params[3:6]
-    R1 = Rotation.from_euler('z', box1_params[6], degrees=False).as_matrix()
-    obb1 = o3d.geometry.OrientedBoundingBox(center1, R1, extent1)
-
-    center2 = box2_params[:3]
-    extent2 = box2_params[3:6]
-    R2 = Rotation.from_euler('z', box2_params[6], degrees=False).as_matrix()
-    obb2 = o3d.geometry.OrientedBoundingBox(center2, R2, extent2)
-
-    # --- 2. Monte Carlo Approximation of Intersection Volume ---
-
-    # Generate random points uniformly within the axis-aligned version of box 1
-    points_local1 = np.random.rand(num_samples, 3) - 0.5
-    points_local1 *= extent1
-
-    ### MODIFICATION START: Correctly transform points to world frame ###
-
-    # Manually create the 4x4 transformation matrix for obb1
-    transform_matrix1 = np.eye(4)
-    transform_matrix1[:3, :3] = obb1.R
-    transform_matrix1[:3, 3] = obb1.center
-
-    # Convert local points to homogeneous coordinates for transformation
-    points_local1_homo = np.hstack((points_local1, np.ones((num_samples, 1))))
-
-    # Apply the transformation: (4x4 matrix) @ (4xN points)
-    points_world_homo = transform_matrix1 @ points_local1_homo.T
-
-    # Convert back to 3D coordinates (N, 3)
-    points_world = points_world_homo[:3, :].T
-
-    ### MODIFICATION END ###
-
-    # --- 3. Count how many of these points are inside box 2 ---
-    # (This part is correct and remains unchanged)
-    pcd_temp = o3d.geometry.PointCloud()
-    pcd_temp.points = o3d.utility.Vector3dVector(points_world)
-    indices_in_box2 = obb2.get_point_indices_within_bounding_box(pcd_temp.points)
-
-    num_intersecting_points = len(indices_in_box2)
-
-    # --- 4. Calculate Volumes and IoU ---
-    # (This part is correct and remains unchanged)
-    volume1 = obb1.volume()
-    volume2 = obb2.volume()
-
-    intersection_volume = volume1 * (num_intersecting_points / num_samples)
-    union_volume = volume1 + volume2 - intersection_volume
-
-    if union_volume < 1e-6:
-        return 0.0
-
-    iou = intersection_volume / union_volume
-
-    return iou
-
-
 # MODIFIED Function to match the [width, length, height] convention
 def convert_boxes_to_corners(boxes: torch.Tensor) -> torch.Tensor:
   """
@@ -1998,104 +1908,6 @@ def calculate_3d_iou_pytorch3d(boxes1_params: np.ndarray, boxes2_params: np.ndar
     _, iou_matrix_gpu = box3d_overlap(corners1, corners2)
 
     return iou_matrix_gpu.cpu().numpy()
-
-
-def get_object_overlap_signature(frame_data, target_obj_idx_in_frame, iou_min_threshold=0.01):
-    """
-    Calculates a robust overlap signature for the target object in the given frame.
-
-    The signature is a sorted list of tuples, where each tuple represents a significant
-    overlap with another object.
-    Format: [(iou_with_obj1, obj1_instance_token), (iou_with_obj2, obj2_instance_token), ...]
-
-    Args:
-        frame_data (dict): The dictionary for a single frame from your `dict_list`.
-        target_obj_idx_in_frame (int): The index of the target object.
-        iou_min_threshold (float): The minimum IoU to be considered a significant overlap.
-
-    Returns:
-        list: A sorted list of (float, str) tuples representing the signature.
-    """
-    target_obj_bbox_params = frame_data['gt_bbox_3d'][target_obj_idx_in_frame]
-
-    # This list will store all significant overlaps
-    overlaps = []
-
-    for other_obj_idx, other_obj_token in enumerate(frame_data['object_tokens']):
-        # Skip comparing the object to itself
-        if other_obj_idx == target_obj_idx_in_frame:
-            continue
-
-        other_obj_bbox_params = frame_data['gt_bbox_3d_overlap_enlarged'][other_obj_idx]
-
-        # Calculate the 3D IoU (using the Monte Carlo function from before)
-        iou = calculate_3d_iou_monte_carlo(target_obj_bbox_params, other_obj_bbox_params)
-        #iou = calculate_3d_iou_pytorch3d(target_obj_bbox_params, other_obj_bbox_params)[0]
-
-        # If the overlap is significant, add it to our list
-        if iou > iou_min_threshold:
-            relative_yaw = calculate_relative_yaw(target_obj_bbox_params, other_obj_bbox_params)
-            other_obj_category = frame_data['converted_object_category'][other_obj_idx]
-            overlaps.append((iou, other_obj_token, other_obj_category, relative_yaw))
-
-    # VERY IMPORTANT: Sort the list to create a canonical signature.
-    # We sort by the instance token (the second element of the tuple).
-    # This ensures that the order doesn't affect the comparison later.
-    overlaps.sort(key=lambda x: x[1])
-
-    return overlaps
-
-
-def get_object_overlap_signature_COMPARISON(frame_data, target_obj_idx_in_frame, iou_min_threshold=0.01):
-    """
-    TEMPORARY a_iou_comparison_function.
-    Calculates IoU using both Monte Carlo and PyTorch3D methods for side-by-side comparison
-    and prints the results. This is intentionally not batched for easy comparison.
-    """
-
-    all_boxes_in_frame = frame_data['gt_bbox_3d_overlap_enlarged']
-    target_obj_bbox_params = all_boxes_in_frame[target_obj_idx_in_frame]
-
-    # Get the token for logging
-    target_token_short = frame_data['object_tokens'][target_obj_idx_in_frame].split('-')[0]
-
-    overlaps = []
-    print(f"\n--- IoU Comparison for Target Box: {target_token_short}... ---")
-
-    for other_obj_idx, other_obj_token in enumerate(frame_data['object_tokens']):
-        if other_obj_idx == target_obj_idx_in_frame:
-            continue
-
-        other_obj_bbox_params = all_boxes_in_frame[other_obj_idx]
-
-        # --- 1. Calculate IoU with Monte Carlo method ---
-        iou_mc = calculate_3d_iou_monte_carlo(target_obj_bbox_params, other_obj_bbox_params)
-
-        # --- 2. Calculate IoU with exact PyTorch3D method ---
-        # Reshape inputs from (7,) to (1, 7) for the batch-based function
-        target_for_pt3d = target_obj_bbox_params.reshape(1, 7)
-        other_for_pt3d = other_obj_bbox_params.reshape(1, 7)
-        # The result is a (1, 1) matrix, so we get the single value
-        iou_pt3d = calculate_3d_iou_pytorch3d(target_for_pt3d, other_for_pt3d)[0, 0]
-
-        # --- 3. Compare and build signature ---
-        # We will use the more accurate pt3d result for the actual signature
-        iou = iou_pt3d
-
-        # Only print and process if there is a significant overlap
-        if iou > iou_min_threshold or iou_mc > iou_min_threshold:
-            other_token_short = other_obj_token.split('-')[0]
-            print(
-                f"  vs {other_token_short:<8} | Monte Carlo IoU: {iou_mc:.6f} | PyTorch3D (Exact) IoU: {iou_pt3d:.6f}")
-
-            if iou > iou_min_threshold:
-                relative_yaw = calculate_relative_yaw(target_obj_bbox_params, other_obj_bbox_params)
-                other_obj_category = frame_data['converted_object_category'][other_obj_idx]
-                overlaps.append((iou, other_obj_token, other_obj_category, relative_yaw))
-
-    overlaps.sort(key=lambda x: x[1])
-    return overlaps
-
 
 def get_object_overlap_signature_BATCH(frame_data, target_obj_idx_in_frame, iou_min_threshold=0.01):
     """
