@@ -2239,70 +2239,126 @@ def assign_label_by_L_shape(
         pt_labels: np.ndarray
 ) -> Tuple[np.ndarray, List[int]]:
     """
-    Implements the user-preferred logic:
-    1. Check point against the truck's L-shape.
-    2. If it's not in the L-shape, assign it to the trailer.
+    Handles complex multi-class overlaps with a priority system:
+    1. Resolves 3-way (Truck, Trailer, Forklift) overlaps.
+    2. Resolves 2-way overlaps for all new combinations.
     """
     new_labels = pt_labels.flatten().copy()
     reassigned_point_indices = []
 
-    pair_to_pts = defaultdict(list)
+    # --- IMPORTANT: Define the class IDs here ---
+    TRUCK_ID = 10
+    TRAILER_ID = 9
+    FORKLIFT_ID = 13
+
+    # Create a reverse map to get box index from class ID for a given point
+    # This makes the logic inside the loop much cleaner
+    point_to_class_map = defaultdict(dict)
     for pi in overlap_idxs:
-        b = sorted(pt_to_box_map.get(pi, []))
-        if len(b) == 2:
-            pair_to_pts[tuple(b)].append(pi)
+        for box_idx in pt_to_box_map.get(pi, []):
+            class_id = box_cls_labels[box_idx]
+            point_to_class_map[pi][class_id] = box_idx
 
-    for (i, j), pts_indices in pair_to_pts.items():
-        li, lj = box_cls_labels[i], box_cls_labels[j]
-        if {li, lj} != {9, 10}:
-            continue
+    # --- Iterate through each ambiguous point individually ---
+    for pi in overlap_idxs:
+        original_label = new_labels[pi]
 
-        idx_tr = i if li == 10 else j
-        idx_tl = j if idx_tr == i else i
+        # Get the set of unique class IDs this point overlaps with
+        overlapping_classes = set(point_to_class_map[pi].keys())
 
-        # Unpack world-frame parameters
-        cx_tr, cy_tr, cz_tr, w_tr, l_tr, h_tr, yaw_tr, _ = boxes[idx_tr]
-        cx_tl, cy_tl, cz_tl, w_tl, l_tl, h_tl, yaw_tl, _ = boxes[idx_tl]
+        # --- Rule 1: Handle 3-way Truck, Trailer, Forklift overlaps (Highest Priority) ---
+        if {TRUCK_ID, TRAILER_ID, FORKLIFT_ID}.issubset(overlapping_classes):
+            idx_tr = point_to_class_map[pi][TRUCK_ID]
 
-        # Transformation to place points into the truck's local frame
-        c, s = math.cos(-yaw_tr), math.sin(-yaw_tr)
-
-        # Create the local-frame boxes needed to generate the truck's L-shape
-        dx0 = cx_tl - cx_tr
-        dy0 = cy_tl - cy_tr
-        x_loc_tl = dx0 * c - dy0 * s
-        y_loc_tl = dx0 * s + dy0 * c
-        box_tr_local = (0.0, 0.0, 0.0, l_tr, w_tr, h_tr, 0.0)
-        box_tl_local = (x_loc_tl, y_loc_tl, cz_tr - cz_tl, l_tl, w_tl, h_tl, 0.0)
-
-        # Create ONLY the truck's L-shape polygon
-        L_tr, z_ground, z_roof = create_side_L_shapes(box_tr_local, box_tl_local, h_hitch=1.3)
-
-        for pi in pts_indices:
-            original_label = new_labels[pi]
-
-            # Transform point into the truck's local frame
+            # Perform the L-shape check for the truck first
+            # (Code to create L_tr and check point is condensed here for clarity)
+            cx_tr, cy_tr, cz_tr, w_tr, l_tr, h_tr, yaw_tr, _ = boxes[idx_tr]
+            c, s = math.cos(-yaw_tr), math.sin(-yaw_tr)
+            trailer_center_in_truck_frame = transform_matrix([cx_tr, cy_tr, cz_tr],
+                                                             Quaternion(axis=[0, 0, 1], angle=yaw_tr), inverse=True) @ [
+                                                boxes[point_to_class_map[pi][TRAILER_ID]][0],
+                                                boxes[point_to_class_map[pi][TRAILER_ID]][1],
+                                                boxes[point_to_class_map[pi][TRAILER_ID]][2], 1]
+            L_tr, z_ground, z_roof = create_side_L_shapes(
+                (0, 0, 0, l_tr, w_tr, h_tr, 0),
+                (trailer_center_in_truck_frame[0], trailer_center_in_truck_frame[1], trailer_center_in_truck_frame[2],
+                 boxes[point_to_class_map[pi][TRAILER_ID]][4], boxes[point_to_class_map[pi][TRAILER_ID]][3],
+                 boxes[point_to_class_map[pi][TRAILER_ID]][5], 0)
+            )
             xg, yg, zg = points[pi]
             dx_pt = (xg - cx_tr) * c - (yg - cy_tr) * s
             dz_pt = zg - cz_tr
 
-            # Check if point is vertically within the truck's profile
-            if not (z_ground <= dz_pt <= z_roof):
-                continue
-
-            point_2d = Point(dx_pt, dz_pt)
-
-            # --- YOUR LOGIC IMPLEMENTED HERE ---
-            if L_tr.contains(point_2d):
-                new_labels[pi] = 10  # It's in the truck polygon -> Label it Truck
+            if L_tr.contains(Point(dx_pt, dz_pt)):
+                new_labels[pi] = TRUCK_ID
             else:
-                # If it's not in the truck polygon, we know it's in the trailer's
-                # simple bounding box (because it's an overlapping point).
-                # Therefore, we label it Trailer.
-                new_labels[pi] = 9  # Label it Trailer
+                # If not in truck's L-shape, your next priority is trailer
+                new_labels[pi] = TRAILER_ID
 
-            if new_labels[pi] != original_label:
-                reassigned_point_indices.append(pi)
+        # --- Rule 2: Handle 2-way Truck & Forklift overlaps ---
+        elif {TRUCK_ID, FORKLIFT_ID}.issubset(overlapping_classes):
+            idx_tr = point_to_class_map[pi][TRUCK_ID]
+
+            # Same L-shape logic as above
+            cx_tr, cy_tr, cz_tr, w_tr, l_tr, h_tr, yaw_tr, _ = boxes[idx_tr]
+            c, s = math.cos(-yaw_tr), math.sin(-yaw_tr)
+            # We need a "other" box for the function, forklift in this case
+            forklift_center_in_truck_frame = transform_matrix([cx_tr, cy_tr, cz_tr],
+                                                              Quaternion(axis=[0, 0, 1], angle=yaw_tr),
+                                                              inverse=True) @ [
+                                                 boxes[point_to_class_map[pi][FORKLIFT_ID]][0],
+                                                 boxes[point_to_class_map[pi][FORKLIFT_ID]][1],
+                                                 boxes[point_to_class_map[pi][FORKLIFT_ID]][2], 1]
+            L_tr, _, _ = create_side_L_shapes(
+                (0, 0, 0, l_tr, w_tr, h_tr, 0),
+                (forklift_center_in_truck_frame[0], forklift_center_in_truck_frame[1],
+                 forklift_center_in_truck_frame[2], boxes[point_to_class_map[pi][FORKLIFT_ID]][4],
+                 boxes[point_to_class_map[pi][FORKLIFT_ID]][3], boxes[point_to_class_map[pi][FORKLIFT_ID]][5], 0)
+            )
+            xg, yg, zg = points[pi]
+            dx_pt = (xg - cx_tr) * c - (yg - cy_tr) * s
+            dz_pt = zg - cz_tr
+
+            if L_tr.contains(Point(dx_pt, dz_pt)):
+                new_labels[pi] = TRUCK_ID
+            else:
+                new_labels[pi] = FORKLIFT_ID
+
+        # --- Rule 3: Handle 2-way Trailer & Forklift overlaps ---
+        elif {TRAILER_ID, FORKLIFT_ID}.issubset(overlapping_classes):
+            # Your logic: Trailer always wins
+            new_labels[pi] = TRAILER_ID
+
+        # --- Rule 4: Handle original Truck & Trailer overlaps ---
+        elif {TRUCK_ID, TRAILER_ID}.issubset(overlapping_classes):
+            idx_tr = point_to_class_map[pi][TRUCK_ID]
+
+            # Same L-shape logic as your preferred method
+            cx_tr, cy_tr, cz_tr, w_tr, l_tr, h_tr, yaw_tr, _ = boxes[idx_tr]
+            c, s = math.cos(-yaw_tr), math.sin(-yaw_tr)
+            trailer_center_in_truck_frame = transform_matrix([cx_tr, cy_tr, cz_tr],
+                                                             Quaternion(axis=[0, 0, 1], angle=yaw_tr), inverse=True) @ [
+                                                boxes[point_to_class_map[pi][TRAILER_ID]][0],
+                                                boxes[point_to_class_map[pi][TRAILER_ID]][1],
+                                                boxes[point_to_class_map[pi][TRAILER_ID]][2], 1]
+            L_tr, _, _ = create_side_L_shapes(
+                (0, 0, 0, l_tr, w_tr, h_tr, 0),
+                (trailer_center_in_truck_frame[0], trailer_center_in_truck_frame[1], trailer_center_in_truck_frame[2],
+                 boxes[point_to_class_map[pi][TRAILER_ID]][4], boxes[point_to_class_map[pi][TRAILER_ID]][3],
+                 boxes[point_to_class_map[pi][TRAILER_ID]][5], 0)
+            )
+            xg, yg, zg = points[pi]
+            dx_pt = (xg - cx_tr) * c - (yg - cy_tr) * s
+            dz_pt = zg - cz_tr
+
+            if L_tr.contains(Point(dx_pt, dz_pt)):
+                new_labels[pi] = TRUCK_ID
+            else:
+                new_labels[pi] = TRAILER_ID
+
+        # Record if the final label is different from the initial one
+        if new_labels[pi] != original_label:
+            reassigned_point_indices.append(pi)
 
     return new_labels.reshape(-1, 1), reassigned_point_indices
 
