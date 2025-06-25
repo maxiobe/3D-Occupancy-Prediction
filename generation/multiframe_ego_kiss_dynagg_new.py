@@ -9,6 +9,7 @@ import torch.nn.functional as F
 import mmcv
 import numpy as np
 from pytorch3d.ops.iou_box3d import box3d_overlap
+from scipy.spatial import KDTree
 from truckscenes.truckscenes import TruckScenes  ### Truckscenes
 from truckscenes.utils import splits  ### Truckscenes
 from tqdm import tqdm
@@ -2196,6 +2197,40 @@ def get_weather_intensity_filter_mask(point_cloud: np.ndarray, weather_condition
                 ((distances_to_ego <= distance_thresh) & (pc_lidar_intensities > intensity_thresh))
 
     return keep_mask
+
+def resolve_overlap_by_distance(
+    ambiguous_points_xyz: np.ndarray,
+    clean_points_1_xyz: np.ndarray,
+    clean_points_2_xyz: np.ndarray
+) -> np.ndarray:
+    """
+    Classifies ambiguous points based on their nearest neighbor in two clean point sets.
+
+    Args:
+        ambiguous_points_xyz: (N, 3) points to be classified.
+        clean_points_1_xyz: (M, 3) "clean" points belonging to the first class.
+        clean_points_2_xyz: (K, 3) "clean" points belonging to the second class.
+
+    Returns:
+        A boolean array of shape (N,) where True means the point belongs to class 1.
+    """
+    # Handle edge cases where one of the clean sets might be empty
+    if clean_points_1_xyz.shape[0] == 0:
+        return np.zeros(ambiguous_points_xyz.shape[0], dtype=bool) # All points go to class 2
+    if clean_points_2_xyz.shape[0] == 0:
+        return np.ones(ambiguous_points_xyz.shape[0], dtype=bool)  # All points go to class 1
+
+    # Build KD-Trees for efficient nearest neighbor search
+    kdtree_1 = KDTree(clean_points_1_xyz)
+    kdtree_2 = KDTree(clean_points_2_xyz)
+
+    # Query the trees to find the distance to the nearest neighbor for all ambiguous points
+    dist_to_1, _ = kdtree_1.query(ambiguous_points_xyz, k=1)
+    dist_to_2, _ = kdtree_2.query(ambiguous_points_xyz, k=1)
+
+    # Return a boolean mask: True if the point is closer to class 1
+    is_closer_to_1 = dist_to_1 < dist_to_2
+    return is_closer_to_1
 
 
 def create_side_L_shapes(box_tr: Tuple, box_tl: Tuple, h_hitch: float = 1.5) -> Tuple[Polygon, float, float]:
@@ -4387,6 +4422,14 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         overlap_idxs = np.where(point_counts > 1)[0]
 
         if len(overlap_idxs) > 0:
+            viz_cloud_ambiguous = dyn_points_semantic.copy()
+            viz_cloud_ambiguous[overlap_idxs, 3] = 20
+            visualize_pointcloud_bbox(viz_cloud_ambiguous,
+                                      boxes=boxes,
+                                      title=f"All Ambiguous Points Highlighted - Frame {i}",
+                                      self_vehicle_range=self_range,
+                                      vis_self_vehicle=True)
+
             print(f"Found {len(overlap_idxs)} ambiguous points in the final aggregated cloud.")
             pt_to_box_map = defaultdict(list)
             for pi in overlap_idxs:
@@ -4412,6 +4455,18 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
             # --- Step 4: Update the labels within our semantic dynamic points array ---
             dyn_points_semantic[:, 3] = final_dyn_labels.flatten()
+
+            viz_cloud_unreassigned = dyn_points_semantic.copy()
+            unreassigned_indices = np.setdiff1d(overlap_idxs, reassigned_indices)
+            viz_cloud_unreassigned[unreassigned_indices, 3] = 20
+
+            visualize_pointcloud_bbox(viz_cloud_unreassigned,
+                                      boxes=boxes,
+                                      title=f"Unreassigned Ambiguous Points Highlighted - Frame {i}",
+                                      self_vehicle_range=self_range,
+                                      vis_self_vehicle=True)
+
+
             print(f"Refinement complete. {len(reassigned_indices)} dynamic points were reassigned.")
         else:
             print("No ambiguous overlaps found within the dynamic points.")
