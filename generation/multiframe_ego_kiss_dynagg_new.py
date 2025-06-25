@@ -2235,6 +2235,7 @@ def assign_label_by_L_shape(
         pt_to_box_map: Dict[int, List[int]],
         points: np.ndarray,
         boxes: np.ndarray,
+        boxes_iou: np.ndarray,
         box_cls_labels: np.ndarray,
         pt_labels: np.ndarray
 ) -> Tuple[np.ndarray, List[int]]:
@@ -2251,8 +2252,30 @@ def assign_label_by_L_shape(
     TRAILER_ID = 9
     FORKLIFT_ID = 13
 
+    # --- Step 1: Pre-compute Truck-to-Trailer Pairings via IoU ---
+    truck_to_trailer_map = {}
+    all_truck_indices = np.where(box_cls_labels == TRUCK_ID)[0]
+    all_trailer_indices = np.where(box_cls_labels == TRAILER_ID)[0]
+
+    # Only proceed if there are both trucks and trailers to pair
+    if all_truck_indices.size > 0 and all_trailer_indices.size > 0:
+        truck_boxes = boxes_iou[all_truck_indices]
+        trailer_boxes = boxes_iou[all_trailer_indices]
+
+        # Calculate IoU between all trucks and all trailers
+        iou_matrix = calculate_3d_iou_pytorch3d(truck_boxes, trailer_boxes)
+
+        # For each truck, find the trailer with the highest overlap
+        for i, truck_idx in enumerate(all_truck_indices):
+            if iou_matrix.shape[1] > 0:
+                best_trailer_match_idx = np.argmax(iou_matrix[i, :])
+                # Only create a pair if the overlap is significant
+                if iou_matrix[i, best_trailer_match_idx] > 0.01:
+                    # Map the global truck index to the global trailer index
+                    truck_to_trailer_map[truck_idx] = all_trailer_indices[best_trailer_match_idx]
+
+    # --- Step 2: Iterate through ambiguous points and apply rules ---
     # Create a reverse map to get box index from class ID for a given point
-    # This makes the logic inside the loop much cleaner
     point_to_class_map = defaultdict(dict)
     for pi in overlap_idxs:
         for box_idx in pt_to_box_map.get(pi, []):
@@ -2275,13 +2298,15 @@ def assign_label_by_L_shape(
             cx_tr, cy_tr, cz_tr, w_tr, l_tr, h_tr, yaw_tr, _ = boxes[idx_tr]
             c, s = math.cos(-yaw_tr), math.sin(-yaw_tr)
             trailer_center_in_truck_frame = transform_matrix([cx_tr, cy_tr, cz_tr],
-                                                             Quaternion(axis=[0, 0, 1], angle=yaw_tr), inverse=True) @ [
+                                                             Quaternion(axis=[0, 0, 1], angle=yaw_tr),
+                                                             inverse=True) @ [
                                                 boxes[point_to_class_map[pi][TRAILER_ID]][0],
                                                 boxes[point_to_class_map[pi][TRAILER_ID]][1],
                                                 boxes[point_to_class_map[pi][TRAILER_ID]][2], 1]
             L_tr, z_ground, z_roof = create_side_L_shapes(
                 (0, 0, 0, l_tr, w_tr, h_tr, 0),
-                (trailer_center_in_truck_frame[0], trailer_center_in_truck_frame[1], trailer_center_in_truck_frame[2],
+                (trailer_center_in_truck_frame[0], trailer_center_in_truck_frame[1],
+                 trailer_center_in_truck_frame[2],
                  boxes[point_to_class_map[pi][TRAILER_ID]][4], boxes[point_to_class_map[pi][TRAILER_ID]][3],
                  boxes[point_to_class_map[pi][TRAILER_ID]][5], 0)
             )
@@ -2295,41 +2320,7 @@ def assign_label_by_L_shape(
                 # If not in truck's L-shape, your next priority is trailer
                 new_labels[pi] = TRAILER_ID
 
-        # --- Rule 2: Handle 2-way Truck & Forklift overlaps ---
-        elif {TRUCK_ID, FORKLIFT_ID}.issubset(overlapping_classes):
-            idx_tr = point_to_class_map[pi][TRUCK_ID]
-
-            # Same L-shape logic as above
-            cx_tr, cy_tr, cz_tr, w_tr, l_tr, h_tr, yaw_tr, _ = boxes[idx_tr]
-            c, s = math.cos(-yaw_tr), math.sin(-yaw_tr)
-            # We need a "other" box for the function, forklift in this case
-            forklift_center_in_truck_frame = transform_matrix([cx_tr, cy_tr, cz_tr],
-                                                              Quaternion(axis=[0, 0, 1], angle=yaw_tr),
-                                                              inverse=True) @ [
-                                                 boxes[point_to_class_map[pi][FORKLIFT_ID]][0],
-                                                 boxes[point_to_class_map[pi][FORKLIFT_ID]][1],
-                                                 boxes[point_to_class_map[pi][FORKLIFT_ID]][2], 1]
-            L_tr, _, _ = create_side_L_shapes(
-                (0, 0, 0, l_tr, w_tr, h_tr, 0),
-                (forklift_center_in_truck_frame[0], forklift_center_in_truck_frame[1],
-                 forklift_center_in_truck_frame[2], boxes[point_to_class_map[pi][FORKLIFT_ID]][4],
-                 boxes[point_to_class_map[pi][FORKLIFT_ID]][3], boxes[point_to_class_map[pi][FORKLIFT_ID]][5], 0)
-            )
-            xg, yg, zg = points[pi]
-            dx_pt = (xg - cx_tr) * c - (yg - cy_tr) * s
-            dz_pt = zg - cz_tr
-
-            if L_tr.contains(Point(dx_pt, dz_pt)):
-                new_labels[pi] = TRUCK_ID
-            else:
-                new_labels[pi] = FORKLIFT_ID
-
-        # --- Rule 3: Handle 2-way Trailer & Forklift overlaps ---
-        elif {TRAILER_ID, FORKLIFT_ID}.issubset(overlapping_classes):
-            # Your logic: Trailer always wins
-            new_labels[pi] = TRAILER_ID
-
-        # --- Rule 4: Handle original Truck & Trailer overlaps ---
+        # --- Rule 2: Handle original Truck & Trailer overlaps ---
         elif {TRUCK_ID, TRAILER_ID}.issubset(overlapping_classes):
             idx_tr = point_to_class_map[pi][TRUCK_ID]
 
@@ -2337,13 +2328,15 @@ def assign_label_by_L_shape(
             cx_tr, cy_tr, cz_tr, w_tr, l_tr, h_tr, yaw_tr, _ = boxes[idx_tr]
             c, s = math.cos(-yaw_tr), math.sin(-yaw_tr)
             trailer_center_in_truck_frame = transform_matrix([cx_tr, cy_tr, cz_tr],
-                                                             Quaternion(axis=[0, 0, 1], angle=yaw_tr), inverse=True) @ [
+                                                             Quaternion(axis=[0, 0, 1], angle=yaw_tr),
+                                                             inverse=True) @ [
                                                 boxes[point_to_class_map[pi][TRAILER_ID]][0],
                                                 boxes[point_to_class_map[pi][TRAILER_ID]][1],
                                                 boxes[point_to_class_map[pi][TRAILER_ID]][2], 1]
             L_tr, _, _ = create_side_L_shapes(
                 (0, 0, 0, l_tr, w_tr, h_tr, 0),
-                (trailer_center_in_truck_frame[0], trailer_center_in_truck_frame[1], trailer_center_in_truck_frame[2],
+                (trailer_center_in_truck_frame[0], trailer_center_in_truck_frame[1],
+                 trailer_center_in_truck_frame[2],
                  boxes[point_to_class_map[pi][TRAILER_ID]][4], boxes[point_to_class_map[pi][TRAILER_ID]][3],
                  boxes[point_to_class_map[pi][TRAILER_ID]][5], 0)
             )
@@ -2355,6 +2348,45 @@ def assign_label_by_L_shape(
                 new_labels[pi] = TRUCK_ID
             else:
                 new_labels[pi] = TRAILER_ID
+
+        # --- Rule 3: Handle 2-way Trailer & Forklift overlaps ---
+        elif {TRAILER_ID, FORKLIFT_ID}.issubset(overlapping_classes):
+            # Your logic: Trailer always wins
+            new_labels[pi] = TRAILER_ID
+
+        # --- Rule 4: Handle 2-way Truck & Forklift overlaps ---
+        elif {TRUCK_ID, FORKLIFT_ID}.issubset(overlapping_classes):
+            idx_tr = point_to_class_map[pi][TRUCK_ID]
+
+            if idx_tr in truck_to_trailer_map:
+                idx_tl = truck_to_trailer_map[idx_tr]
+
+                # Same L-shape logic as above
+                cx_tr, cy_tr, cz_tr, w_tr, l_tr, h_tr, yaw_tr, _ = boxes[idx_tr]
+                c, s = math.cos(-yaw_tr), math.sin(-yaw_tr)
+
+                # --- Use the paired trailer to create the precise L-shape ---
+                cx_tr, cy_tr, cz_tr, w_tr, l_tr, h_tr, yaw_tr, _ = boxes[idx_tr]
+                cx_tl, cy_tl, cz_tl, w_tl, l_tl, h_tl, yaw_tl, _ = boxes[idx_tl]
+
+                T_truck_from_world = transform_matrix([cx_tr, cy_tr, cz_tr], Quaternion(axis=[0, 0, 1], angle=yaw_tr),
+                                                      inverse=True)
+                trailer_center_in_world = np.array([cx_tl, cy_tl, cz_tl, 1])
+                trailer_center_in_truck_frame = T_truck_from_world @ trailer_center_in_world
+
+                L_tr, z_ground, z_roof = create_side_L_shapes(
+                    (0, 0, 0, l_tr, w_tr, h_tr, 0),
+                    (trailer_center_in_truck_frame[0], trailer_center_in_truck_frame[1], trailer_center_in_truck_frame[2],
+                     l_tl, w_tl, h_tl, 0)
+                )
+                xg, yg, zg = points[pi]
+                dx_pt = (xg - cx_tr) * c - (yg - cy_tr) * s
+                dz_pt = zg - cz_tr
+
+                if L_tr.contains(Point(dx_pt, dz_pt)):
+                    new_labels[pi] = TRUCK_ID
+                else:
+                    new_labels[pi] = FORKLIFT_ID
 
         # Record if the final label is different from the initial one
         if new_labels[pi] != original_label:
@@ -4322,6 +4354,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
         # Use slightly enlarged, mmcv-compatible boxes to find all potential overlaps
         boxes_for_mmcv_check = frame_dict['gt_bbox_3d_points_in_boxes_cpu_enlarged']
+        boxes_for_overlap = frame_dict['gt_bbox_3d_overlap_enlarged']
 
         points_in_boxes = points_in_boxes_cpu(
             torch.from_numpy(dyn_points[np.newaxis, :, :]),
@@ -4350,6 +4383,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                 pt_to_box_map=pt_to_box_map,
                 points=dyn_points,  # Pass only the dynamic points
                 boxes=boxes_with_labels,
+                boxes_iou=boxes_for_overlap,
                 box_cls_labels=box_categories,
                 pt_labels=labels_before_refinement  # Pass only the dynamic points' labels
             )
