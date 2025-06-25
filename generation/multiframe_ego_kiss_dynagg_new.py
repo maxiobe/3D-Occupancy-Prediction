@@ -2248,9 +2248,21 @@ def assign_label_by_L_shape(
     reassigned_point_indices = []
 
     # --- IMPORTANT: Define the class IDs here ---
-    TRUCK_ID = 10
+    NOISE_ID = 0
+    BARRIER_ID = 1
+    BICYCLE_ID = 2
+    BUS_ID = 3
+    CAR_ID = 4
+    CONSTRUCTION_ID = 5
+    MOTORCYCLE_ID = 6
+    PEDESTRIAN_ID = 7
+    CONE_ID = 8
     TRAILER_ID = 9
+    TRUCK_ID = 10
+    ANIMAL_ID = 11
+    SIGN_ID = 12
     FORKLIFT_ID = 13
+    TRAIN_ID = 14
 
     # --- Step 1: Pre-compute Truck-to-Trailer Pairings via IoU ---
     truck_to_trailer_map = {}
@@ -2276,6 +2288,7 @@ def assign_label_by_L_shape(
 
     # --- Step 2: Iterate through ambiguous points and apply rules ---
     # Create a reverse map to get box index from class ID for a given point
+    changed_ids = 0
     point_to_class_map = defaultdict(dict)
     for pi in overlap_idxs:
         for box_idx in pt_to_box_map.get(pi, []):
@@ -2316,9 +2329,11 @@ def assign_label_by_L_shape(
 
             if L_tr.contains(Point(dx_pt, dz_pt)):
                 new_labels[pi] = TRUCK_ID
+                changed_ids += 1
             else:
                 # If not in truck's L-shape, your next priority is trailer
                 new_labels[pi] = TRAILER_ID
+                changed_ids += 1
 
         # --- Rule 2: Handle original Truck & Trailer overlaps ---
         elif {TRUCK_ID, TRAILER_ID}.issubset(overlapping_classes):
@@ -2346,13 +2361,16 @@ def assign_label_by_L_shape(
 
             if L_tr.contains(Point(dx_pt, dz_pt)):
                 new_labels[pi] = TRUCK_ID
+                changed_ids += 1
             else:
                 new_labels[pi] = TRAILER_ID
+                changed_ids += 1
 
         # --- Rule 3: Handle 2-way Trailer & Forklift overlaps ---
         elif {TRAILER_ID, FORKLIFT_ID}.issubset(overlapping_classes):
             # Your logic: Trailer always wins
             new_labels[pi] = TRAILER_ID
+            changed_ids += 1
 
         # --- Rule 4: Handle 2-way Truck & Forklift overlaps ---
         elif {TRUCK_ID, FORKLIFT_ID}.issubset(overlapping_classes):
@@ -2385,12 +2403,16 @@ def assign_label_by_L_shape(
 
                 if L_tr.contains(Point(dx_pt, dz_pt)):
                     new_labels[pi] = TRUCK_ID
+                    changed_ids += 1
                 else:
                     new_labels[pi] = FORKLIFT_ID
+                    changed_ids += 1
 
         # Record if the final label is different from the initial one
         if new_labels[pi] != original_label:
             reassigned_point_indices.append(pi)
+
+    print(f"Assigned {changed_ids} overlap points")
 
     return new_labels.reshape(-1, 1), reassigned_point_indices
 
