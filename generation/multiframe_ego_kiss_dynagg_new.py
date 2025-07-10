@@ -1992,8 +1992,6 @@ def compare_signatures(sig1, sig2,
     # If all checks passed, the signatures are a match
     return True
 
-
-# --- 2. NEW CLASS-BASED SIGNATURE COMPARISON FUNCTION ---
 def compare_signatures_class_based(sig1, target_cat1, sig2, target_cat2, thresholds_config):
     """
     Compares two overlap signatures using class-based, dynamic thresholds.
@@ -2029,7 +2027,6 @@ def compare_signatures_class_based(sig1, target_cat1, sig2, target_cat2, thresho
         if token1 != token2 or neighbor_cat1 != neighbor_cat2:
             return False
 
-        # --- DYNAMIC THRESHOLD LOOKUP ---
         # Create the key for the dictionary lookup
         class_pair_key = frozenset({target_cat1, neighbor_cat1})
 
@@ -2282,7 +2279,6 @@ def assign_label_by_L_shape(
     new_labels = pt_labels.flatten().copy()
     reassigned_point_indices = []
 
-    # --- IMPORTANT: Define the class IDs here ---
     NOISE_ID = 0
     BARRIER_ID = 1
     BICYCLE_ID = 2
@@ -2451,25 +2447,30 @@ def assign_label_by_L_shape(
 
     return new_labels.reshape(-1, 1), reassigned_point_indices
 
-def main(trucksc, val_list, indice, truckscenesyaml, args, config):
-    # Extract necessary parameters from the arguments and configs
+def main(trucksc, indice, truckscenesyaml, args, config):
+
+    ########################## Extract parameters from config and args #############################################
     save_path = args.save_path  # Directory where processed data will be saved
     data_root = args.dataroot  # Root directory of dataset
     learning_map = truckscenesyaml['learning_map']  # dictionary that maps raw semantic labels to learning labels
     voxel_size = config['voxel_size']  # Size of each voxel in the occupancy grid
-    pc_range = config['pc_range']  # Range of point cloud coordinates to consider (bounding box)
+    pc_range = config['pc_range']  # Range of point cloud coordinates to consider
     occ_size = config['occ_size']  # Dimensions of the output occupancy grid
-    load_mode = args.load_mode
+    load_mode = args.load_mode # Load mode of point clouds with or wihtout deskewing
     self_range = config[
-        'self_range']  # Parameter in config file that specifies a range threshold for the vehicle's own points
+        'self_range']  # Range threshold for the vehicle's own points
     x_min_self, y_min_self, z_min_self, x_max_self, y_max_self, z_max_self = self_range
 
-    intensity_threshold = config['intensity_threshold']
-    distance_intensity_threshold = config['distance_intensity_threshold']
+    intensity_threshold = config['intensity_threshold'] # Threshold for lidar intensity filtering
+    distance_intensity_threshold = config['distance_intensity_threshold'] # Distance for lidar intensity filtering
 
-    # sensors = ['LIDAR_LEFT', 'LIDAR_RIGHT']
+    max_time_diff = config['max_time_diff'] # allowed time difference between different sensors for aggregating over sensors
+
+    ################################ Load config for used sensors for aggregation #################################
     sensors = config['sensors']
     print(f"Lidar sensors: {sensors}")
+
+    ########################### Generate list for sensor range (needed for visibility masks) later ###################
     sensors_max_range_list = []
     for sensor in sensors:
         if sensor in ['LIDAR_LEFT', 'LIDAR_RIGHT']:
@@ -2479,41 +2480,50 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     print(f"Lidar sensors max range: {sensors_max_range_list}")
     sensor_max_ranges_arr = np.array(sensors_max_range_list, dtype=np.float64)
 
+    ############################## Load config for cameras for camera visibility mask ###############################
     cameras = config['cameras']
     print(f"Cameras: {cameras}")
 
-    max_time_diff = config['max_time_diff']
-
-    # Retrieves a specific scene from the truckScenes dataset
-    my_scene = trucksc.scene[indice]  # scene is selected by indice parameter
-    scene_name = my_scene['name']  ### Extract scene name for saving
+    ############################# Start processing scene #########################################
+    my_scene = trucksc.scene[indice]
+    scene_name = my_scene['name']
     print(f"Processing scene: {scene_name}")
     scene_description = my_scene['description']
     print(f"Scene description: {scene_description}")
-
-    # find the part that starts with "weather."
-    weather_tag = next(tag for tag in scene_description.split(';') if tag.startswith('weather.'))
-    # split on the dot and take the second piece
-    weather = weather_tag.split('.', 1)[1]
-
     # load the first sample from a scene to start
     first_sample_token = my_scene[
         'first_sample_token']  # access the first sample token: contains token of first frame of the scene
     my_sample = trucksc.get('sample',
                             first_sample_token)  # retrieve the first sample as dictionary. Dictionary includes data from multiple sensors
 
-    # Data split handling
+    ############################# Find weather in scene description for lidar intensity filtering ####################
+    # find the part that starts with "weather."
+    weather_tag = next(tag for tag in scene_description.split(';') if tag.startswith('weather.'))
+    # split on the dot and take the second piece
+    weather = weather_tag.split('.', 1)[1]
+
+    ############################## Data split handling #############################################
     if args.split == 'train':
-        if my_scene['token'] in val_list:  # Ensures that no validation data is mistakenly used in training
+        if scene_name not in splits.train:
             return
     elif args.split == 'val':
-        if my_scene['token'] not in val_list:  # Ensures that no training data is used during validation
+        if scene_name not in splits.val:
             return
-    elif args.split == 'all':  # Proceeds without filtering, useful for generating predictions or evaluations on the entire dataset
+    elif args.split == 'test':
+        if scene_name not in splits.test:
+            return
+    elif args.split == 'mini_train':
+        if scene_name not in splits.mini_train:
+            return
+    elif args.split == 'mini_val':
+        if scene_name not in splits.mini_val:
+            return
+    elif args.split in ['all', 'mini']:
         pass
-    else:  # Error if split type is not recognized
-        raise NotImplementedError
+    else:
+        raise NotImplementedError(f"The split '{args.split}' is not a valid or recognized split.")
 
+    ############################ Define learning indexes ##########################################
     # Define the numeric index for the 'Unknown' class
     # Assuming key 36 maps to 'Unknown' in labels and learning_map[36] is 15
     unknown_label_key = 36
@@ -2527,6 +2537,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     free_label_key = 38
     FREE_LEARNING_INDEX = learning_map.get(free_label_key, 17)
 
+    ############################ Mapping from Category name to learning id  and vice versa ############################
     # Create a mapping from category name (e.g., "car") to learning ID (e.g., 4)
     category_name_to_learning_id = {}
     for label_key, label_name_in_yaml in truckscenesyaml['labels'].items():
@@ -2535,7 +2546,6 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             category_name_to_learning_id[label_name_in_yaml] = mapped_label_index
 
     # Create the reverse mapping from learning ID (e.g., 10) to name (e.g., "truck")
-    # We ensure the keys are integers for correct lookups.
     learning_id_to_name = {int(k): v for k, v in truckscenesyaml['labels_16'].items()}
 
     # Define the learning ID for the category we want to apply the Z-centroid check to
@@ -2548,38 +2558,30 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     BARRIER_ID = category_name_to_learning_id.get('barrier', 10)
     PEDESTRIAN_ID = category_name_to_learning_id.get('pedestrian', 10)
 
+
+    ########################## Specify thresholds for later aggregation based on overlap #########################
+
     CLASS_BASED_THRESHOLDS = {
-        # --- Interaction: truck <-> trailer ---
-        # This is a tight, expected interaction. We use a high threshold.
         frozenset({TRUCK_ID, TRAILER_ID}): {
             'iou_strong_threshold': 0.10,
-            'iou_strong_tolerance': 0.10,  # Allow a larger difference since they are large objects
+            'iou_strong_tolerance': 0.10,
             'yaw_tolerance_rad': 0.1
         },
-        # --- Interaction: car <-> car ---
-        # Two cars shouldn't have a high IoU unless they are crashing.
         frozenset({CAR_ID, CAR_ID}): {
             'iou_strong_threshold': 0.05,
             'iou_strong_tolerance': 0.05,
             'yaw_tolerance_rad': 0.2
         },
-        # --- Interaction: truck <-> other_vehicle ---
-        # Based on your logs, this seems to be an incidental, "nearby" interaction.
-        # We can use a lower threshold to still capture it in the signature,
-        # but the logic will correctly classify it as 'weak'.
         frozenset({TRUCK_ID, OTHER_VEHICLE_ID}): {
             'iou_strong_threshold': 0.01,
             'iou_strong_tolerance': 0.001,
             'yaw_tolerance_rad': 0.2
         },
-
         frozenset({TRAILER_ID, OTHER_VEHICLE_ID}): {
             'iou_strong_threshold': 0.01,
             'iou_strong_tolerance': 0.001,
             'yaw_tolerance_rad': 0.2
         },
-        # --- DEFAULT FALLBACK ---
-        # This is crucial for any pair you haven't explicitly defined.
         'default': {
             'iou_strong_threshold': 0.05,
             'iou_strong_tolerance': 0.01,
@@ -2587,12 +2589,15 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         }
     }
 
+    ######################### Get all lidar entries for the current scene and given scenes ###########################
     lidar_entries = load_lidar_entries(trucksc=trucksc, sample=my_sample, lidar_sensors=sensors)
     print(f"Number of lidar entries: {len(lidar_entries)}")
 
+    ########################## Generate groups of lidar scans from different sensors with max time diff ##############
     groups = group_entries(entries=lidar_entries, lidar_sensors=sensors, max_time_diff=max_time_diff)
     print(f"\n✅ Total groups found: {len(groups)}")
 
+    ######################## Looping over the generated groups and save data in a dict_list ############################
     dict_list = []
 
     reference_ego_pose = None
@@ -2605,6 +2610,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
         ref_sensor = sensors[0]
 
+        ################### Generate a sample dict to load the lidar point clouds and calculate timestamp #########
         sample_data_dict = {sensor: group[sensor]['token'] for sensor in sensors}
         sample = {
             'timestamp': np.mean([group[s]['timestamp'] for s in sensors]),
@@ -2613,7 +2619,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             'is_key_frame': group[ref_sensor]['keyframe'],
         }
 
-        ########### Load point cloud #############
+        ##################################### Load point cloud #########################################
         if load_mode == 'pointwise':
             sensor_fused_pc, sensor_ids_points = get_pointwise_fused_pointcloud(trucksc, sample,
                                                                                 allowed_sensors=sensors)
@@ -2628,11 +2634,13 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         else:
             print(f"The fused sensor pc at frame {i} has the shape: {sensor_fused_pc.points.shape} with no timestamps.")
 
-        ##########################################
+        ############################# Specify list for scenes with manual annotations given ####################
         if args.version == 'v1.0-trainval':
             scene_terminal_list = [4, 68, 69, 70, 203, 205, 206, 241, 272, 273, 423, 492, 597]
         elif args.version == 'v1.0-test':
             scene_terminal_list = [3, 114, 115, 116]
+        elif args.version == 'v1.0-mini':
+            scene_terminal_list = [5]
 
         ################################# Uncomment if you need to save pointclouds for annotation ###########################
 
@@ -2652,22 +2660,22 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             save_pointcloud_for_annotation(sensor_fused_pc.points.T, annotation_data_save_path)"""
 
 
-        ########### get boxes #####################
-        # --- Step 1: Get original boxes from the dataset ---
+        ########################################### Get boxes given in dataset ####################################
+        # Get original boxes from the dataset
         boxes_global = trucksc.get_boxes(sample['sample_data_token'])
 
-        # Convert to ego or sensor frame (optional depending on fusion mode)
+        # Get ego pose for transformation
         pose_record = trucksc.getclosest('ego_pose', trucksc.get('sample_data', sample['sample_data_token'])['timestamp'])
 
+        # Transform boxes to ego frame
         boxes_ego = transform_boxes_to_ego(
             boxes=boxes_global,
             ego_pose_record=pose_record
         )
 
-        original_boxes_token = [box.token for box in boxes_ego]  # retrieves a list of tokens from the bounding box
-        # Extract object categories
+        original_boxes_token = [box.token for box in boxes_ego]
         original_object_category_names = [truckscenes.get('sample_annotation', box_token)['category_name'] for box_token in
-                           original_boxes_token]  # retrieves category name for each bounding box
+                           original_boxes_token]
 
         # Convert original category names to numeric learning IDs
         converted_object_category = []
@@ -2675,7 +2683,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             numeric_label = category_name_to_learning_id.get(category_name, UNKNOWN_LEARNING_INDEX)
             converted_object_category.append(numeric_label)
 
-        ##################################################### get manual boxes for terminal scenes ###################################
+        ###################################### get manual boxes for terminal scenes ###################################
         if indice in scene_terminal_list:
             annotation_base = os.path.join(data_root, 'annotation')
             if sample['is_key_frame']:
@@ -2689,7 +2697,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                                                      load_annotation_ending)
             manual_boxes = parse_single_annotation_file(annotation_data_load_path)
 
-            if manual_boxes:  # This checks if the list is not empty
+            if manual_boxes:
                 print(f"Frame {i}: Loaded {len(manual_boxes)} manual annotations. Augmenting GT.")
                 for box in manual_boxes:
                     boxes_ego.append(box)
@@ -2697,11 +2705,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                     numeric_label = category_name_to_learning_id.get(manual_category_name, UNKNOWN_LEARNING_INDEX)
                     converted_object_category.append(numeric_label)
 
-        # Extract object tokens. Each instance token represents a unique object
-        #original_object_tokens = [truckscenes.get('sample_annotation', box_token)['instance_token'] for
-         #                         box_token in
-          #                        original_boxes_token]  # Uses sample_annotation data to get instance_token fore each bb
-
+        ####################### Assign object tokens for manual boxes #####################################
         object_tokens = []
         for box in boxes_ego:
             if box.token is not None:
@@ -2712,39 +2716,6 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                 # This is a manually added box, it has no token in the dataset
                 manual_token = f"manual_{box.name}"
                 object_tokens.append(manual_token)
-
-        # print(object_tokens)
-
-        ############################# get object categories ##########################
-        """converted_object_category = []  # Initialize empty list
-
-        # Iterate over each object category extracted earlier
-        for category in object_category:
-            found_match = False
-            # Iterate over label mappings defined in truckscenes.yaml file
-            for label_key, label_name_in_yaml in truckscenesyaml['labels'].items():
-                # Check category and map to learning label
-                if category == label_name_in_yaml:
-                    mapped_label_index = learning_map.get(label_key)
-                    if mapped_label_index is not None:
-                        converted_object_category.append(mapped_label_index)
-                        found_match = True
-                        break  # Found the mapping, move to the next category
-                    else:
-                        # This case means label_key exists in 'labels' but not 'learning_map'
-                        print(
-                            f"Warning: Category '{category}' mapped to label_key '{label_key}', but '{label_key}' not found in learning_map. Using 'Unknown' label.")
-                        # --- CHANGE: Use UNKNOWN_LEARNING_INDEX ---
-                        converted_object_category.append(UNKNOWN_LEARNING_INDEX)
-                        found_match = True
-                        break
-
-            # If the category was not found in the truckscenesyaml['labels'] mapping at all
-            if not found_match:
-                print(
-                    f"Warning: Category '{category}' not found in truckscenes.yaml mapping. Using 'Unknown' label.")
-                # --- CHANGE: Use UNKNOWN_LEARNING_INDEX ---
-                converted_object_category.append(UNKNOWN_LEARNING_INDEX)"""
 
         ############################# get bbox attributes ##########################
         locs = np.array([b.center for b in boxes_ego]).reshape(-1,
@@ -2882,7 +2853,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         inside_ego_mask = inside_x & inside_y & inside_z
 
 
-        #################################### prepare data for kiss-icp ##############################################
+        ############################ Prepare point clouds for kiss-icp #################################
         VELOCITY_THRESHOLD_M_S = 0.2
 
         is_box_moving_mask = np.zeros(len(boxes_ego), dtype=bool)
@@ -2908,8 +2879,6 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         # Create the intermediate point cloud (with ego/dynamic objects removed)
         pc_for_icp = sensor_fused_pc.points.T[initial_keep_for_icp_mask_np]
 
-        # --- Step 2: Apply conditional intensity filter for bad weather ---
-        # This filter is applied ONLY to the `pc_for_icp` data and only to background points.
         if args.filter_lidar_intensity and weather in ['snow', 'rain', 'fog']:
             print(f"Applying special conditional intensity filter to ICP data for weather: '{weather}'...")
 
@@ -2948,12 +2917,11 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         print(
             f"Original points for frame: {sensor_fused_pc.points.shape[1]}. Final points for ICP: {pc_for_icp.shape[0]}")
 
-
+        ################################ Prepare points for static and dynamic maps ################################
         num_points = sensor_fused_pc.points.shape[1]
         points_label = np.full((num_points, 1), BACKGROUND_LEARNING_INDEX, dtype=np.uint8)
 
         # Assign object labels to points inside bounding boxes
-        # Ensure converted_object_category has the correct mapped labels
         for box_idx in range(gt_bbox_3d_points_in_boxes_cpu_enlarged.shape[0]):
             # Get the mask for points in the current box
             object_points_mask = points_in_boxes[0][:, box_idx].bool()
@@ -2979,13 +2947,11 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             objects_points_list_sensor_ids.append(object_points_sensor_ids)
             j = j + 1
 
-        # shape: (1, Npoints, Nboxes)
         point_box_mask = points_in_boxes[0]  # Remove batch dim: shape (Npoints, Nboxes)
 
         # Point is dynamic if it falls inside *any* box
         dynamic_mask = point_box_mask.any(dim=-1)  # shape: (Npoints,)
 
-        # Count
         num_dynamic_points = dynamic_mask.sum().item()
         print(f"Number of dynamic points: {num_dynamic_points}")
 
@@ -2995,6 +2961,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         num_ego_points = inside_ego_mask.sum().item()
         print(f"Number of points on ego vehicle: {num_ego_points}")
 
+        ###################################### Generate labels for mapmos as gt ####################################
         dynamic_mask_mapmos = dynamic_mask | inside_ego_mask
 
         current_frame_mapmos_labels = dynamic_mask_mapmos.cpu().numpy().astype(np.int32).reshape(-1, 1)
@@ -3004,6 +2971,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         total_mapmos_dynamic_labels = dynamic_mask_mapmos.sum().item()
         print(f"Total points labeled as dynamic for MapMOS input (annotated dynamic + ego): {total_mapmos_dynamic_labels}")
 
+        ################################# Process static and dynamic points to aggregate ###########################
         ego_filter_mask = ~inside_ego_mask
 
         points_mask = static_mask & ego_filter_mask
@@ -3013,34 +2981,27 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         print(
             f"Number of static points extracted: {pc_ego_unfiltered.shape} with sensor_ids {pc_ego_unfiltered_sensors.shape}")
 
-        """for box_idx in range(gt_bbox_3d.shape[0]):
-            num_in_box = points_in_boxes[0][:, box_idx].sum().item()
-            print(f"Box {box_idx} contains {num_in_box} points")"""
-
         pc_with_semantic_ego_unfiltered = pc_with_semantic[points_mask]
         pc_with_semantic_ego_unfiltered_sensors = sensor_ids_points.copy().T[points_mask]
         print(
             f"Number of semantic static points extracted: {pc_with_semantic_ego_unfiltered.shape} with sensor_ids {pc_with_semantic_ego_unfiltered_sensors.shape}")
 
 
-        ########################################### Dynamic point filtering #########################################################
+        ################################# Dynamic point filtering of static map with max enlarged boxes##################
 
         print(f"Filtering static point cloud with max enlarged boxes")
         points_in_boxes_max_enlarged = points_in_boxes_cpu(torch.from_numpy(pc_ego_unfiltered[:, :3][np.newaxis, :, :]),
                                               torch.from_numpy(gt_bbox_3d_points_in_boxes_cpu_max_enlarged[np.newaxis,
-                                                               :]))  # use function to identify which points belong to which bounding box
+                                                               :]))
 
-        point_box_mask_max_enlarged = points_in_boxes_max_enlarged[0]  # Remove batch dim: shape (Npoints, Nboxes)
+        point_box_mask_max_enlarged = points_in_boxes_max_enlarged[0]
 
-        # Point is dynamic if it falls inside *any* box
-        dynamic_mask_max_enlarged = point_box_mask_max_enlarged.any(dim=-1)  # shape: (Npoints,)
+        dynamic_mask_max_enlarged = point_box_mask_max_enlarged.any(dim=-1)
 
-        # Count
         num_dynamic_points_filter = dynamic_mask_max_enlarged.sum().item()
         print(f"Number of dynamic points to filter with enlarged box: {num_dynamic_points_filter}")
 
-        # Get static mask (inverse)
-        static_mask_max_enlarged = ~dynamic_mask_max_enlarged
+        static_mask_max_enlarged = ~dynamic_mask_max_enlarged # Get static mask (inverse)
 
         pc_ego_unfiltered = pc_ego_unfiltered[static_mask_max_enlarged]
         pc_ego_unfiltered_sensors = pc_ego_unfiltered_sensors[static_mask_max_enlarged]
@@ -3056,12 +3017,6 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
 
         ############################### Visualize if specified in arguments ###########################################
-        """visualize_pointcloud_bbox(pc_with_semantic_ego_unfiltered,
-                                          boxes=boxes_ego,
-                                          title=f"Fused filtered static sensor PC + BBoxes + Ego BBox - Frame {i}",
-                                          self_vehicle_range=self_range,
-                                          vis_self_vehicle=True)"""
-
         if args.vis_static_pc:
             visualize_pointcloud_bbox(pc_with_semantic_ego_unfiltered,
                                       boxes=boxes_ego,
@@ -3128,35 +3083,28 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                                       vis_self_vehicle=True)
         #######################################################################################################
 
-        # Get ego pose for this sample
+        ################################### Transform points in different coordinate frames #######################
         ego_pose_i = trucksc.getclosest('ego_pose', sample['timestamp'])
 
-        # Transformation from ego to global
         global_from_ego_i = transform_matrix(ego_pose_i['translation'], Quaternion(ego_pose_i['rotation']),
                                              inverse=False)
 
         if reference_ego_pose is None:
-            reference_ego_pose = ego_pose_i  # Store reference pose
-            # Calculate transform from global TO reference ego
+            reference_ego_pose = ego_pose_i
             ref_ego_from_global = transform_matrix(reference_ego_pose['translation'],
                                                    Quaternion(reference_ego_pose['rotation']), inverse=True)
-            # Transformation from current ego (i) to reference ego is identity
             ego_ref_from_ego_i = np.eye(4)
             print(f"Frame {i}: Set as reference frame.")
         else:
-            # Calculate transformation from current ego (i) TO reference ego
             # ego_ref <- global <- ego_i
             ego_ref_from_ego_i = ref_ego_from_global @ global_from_ego_i
             print(f"Frame {i}: Calculated transform to reference frame.")
 
-        # --- Transform FILTERED static points TO REFERENCE EGO FRAME ---
-        # Inputs to transform_points should be the filtered points: pc_ego, pc_with_semantic_ego
         points_in_ref_frame = transform_points(pc_ego, ego_ref_from_ego_i)
         #semantic_points_in_ref_frame = transform_points(pc_with_semantic_ego, ego_ref_from_ego_i)
         print(f"Frame {i}: Transformed static points to ref ego. Shape: {points_in_ref_frame.shape}")
         #print(f"Frame {i}: Transformed semantic static points to ref ego. Shape: {semantic_points_in_ref_frame.shape}")
 
-        # --- Transform FILTERED static points TO GLOBAL FRAME ---
         points_in_global_frame = transform_points(pc_ego, global_from_ego_i)
         #semantic_points_in_global_frame = transform_points(pc_with_semantic_ego, global_from_ego_i)
         print(f"Frame {i}: Transformed static points to global. Shape: {points_in_global_frame.shape}")
@@ -3166,8 +3114,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         if args.vis_static_pc_global:
             visualize_pointcloud(points_in_ref_frame, title=f"Fused sensor PC in world coordinates - Frame {i}")
 
-        # Assign the calculated variables to the desired keys
-        pc_ego_i_save = pc_ego.copy()  # Filtered points in current ego frame (Features, N)
+        pc_ego_i_save = pc_ego.copy()
         print(f"Frame {i}: Static points in ego frame shape: {pc_ego_i_save.shape}")
         # pc_with_semantic_ego_i_save = pc_with_semantic_ego.copy()  # Filtered semantic points in current ego frame (Features+1, N)
         # print(f"Frame {i}: Static semantic points in ego frame shape: {pc_with_semantic_ego_i_save.shape}")
@@ -3176,7 +3123,7 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         pc_global_save = points_in_global_frame.copy()  # Filtered points transformed to global frame (Features, N)
         # pc_with_semantic_global_save = semantic_points_in_global_frame.copy()  # Filtered semantic points transformed to global frame (Features+1, N)
 
-        ################## record information into a dict  ########################
+        ################## Save all information into a dict  ########################
         ref_sd = trucksc.get('sample_data', sample['sample_data_token'])
 
         frame_dict = {
@@ -3217,34 +3164,17 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             "lidar_pc_for_icp_ego_i": pc_for_icp
         }
 
-        # append the dictionary to list
-        dict_list.append(frame_dict)  # appends dictionary containing frame data to the list dict_list
-        # After iterating through the entire scene, this list will contain information for all frames in the scene
+        ########################## Save dictionary into a list ###############################
+        dict_list.append(frame_dict)
 
-    ################# Prepare Lists for Static Scene Points (in Reference Ego Frame) ########################
-
-    # These lists will hold points already transformed into the reference ego frame
-    # using the ORIGINAL (unrefined) poses calculated in the previous loop.
-    # The subsequent ICP step (if enabled) should refine the poses and potentially
-    # regenerate these lists with higher accuracy.
+    ################# Prepare Lists for Static Scene Points (in Reference Ego Frame) ########################.
 
     print("Extracting static points previously transformed to reference ego frame...")
 
-    # Extract static points (already in ref ego frame, Features x N format)
-    # Use the correct key from the dictionary populated earlier
+    ################## static point cloud in ego i frame ################################
     unrefined_pc_ego_list = [frame_dict['lidar_pc_ego_i'] for frame_dict in dict_list]
     print(f"Extracted {len(unrefined_pc_ego_list)} static point clouds (in ego i frame).")
-
     unrefined_pc_ego_list_sensor_ids = [frame_dict['lidar_pc_ego_sensor_ids'] for frame_dict in dict_list]
-
-    # Extract semantic static points (already in ref ego frame, Features+1 x N format)
-    # Use the correct key from the dictionary populated earlier
-    # unrefined_sem_pc_ego_list = [frame_dict['lidar_pc_with_semantic_ego_i'] for frame_dict in dict_list]
-    # print(f"Extracted {len(unrefined_sem_pc_ego_list)} semantic point clouds (in ego i frame).")
-
-    # unrefined_sem_pc_ego_list_sensor_ids = [frame_dict['lidar_pc_with_semantic_ego_sensor_ids'] for frame_dict in
-      #                                      dict_list]
-
     pc_ego_combined_draw = np.concatenate(unrefined_pc_ego_list, axis=0)
     print(f"Pc ego i combined shape: {pc_ego_combined_draw.shape}")
 
@@ -3254,16 +3184,11 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         pc_coordinates = pc_ego_combined_draw[:, :3]
         pc_ego_to_draw.points = o3d.utility.Vector3dVector(pc_coordinates)
         o3d.visualization.draw_geometries([pc_ego_to_draw], window_name="Combined static point clouds (in ego i frame)")
-    ########################################################################################
 
+    #################### static point cloud in ego ref frame #############################
     unrefined_pc_ego_ref_list = [frame_dict['lidar_pc_ego_ref'] for frame_dict in dict_list]
     print(f"Extracted {len(unrefined_pc_ego_ref_list)} static point clouds (in ego ref frame).")
     unrefined_pc_ego_ref_list_sensor_ids = [frame_dict['lidar_pc_ego_sensor_ids'] for frame_dict in dict_list]
-    # unrefined_sem_pc_ego_ref_list = [frame_dict['lidar_pc_with_semantic_ego_ref'] for frame_dict in dict_list]
-    # print(f"Extracted {len(unrefined_sem_pc_ego_ref_list)} semantic static point clouds (in ego ref frame).")
-    # unrefined_sem_pc_ego_ref_list_sensor_ids = [frame_dict['lidar_pc_with_semantic_ego_sensor_ids'] for frame_dict in
-      #                                          dict_list]
-
     pc_ego_ref_combined_draw = np.concatenate(unrefined_pc_ego_ref_list, axis=0)
     print(f"Pc ego ref combined shape: {pc_ego_ref_combined_draw.shape}")
 
@@ -3274,13 +3199,10 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         pc_ego_ref_to_draw.points = o3d.utility.Vector3dVector(pc_ego_ref_coordinates)
         o3d.visualization.draw_geometries([pc_ego_ref_to_draw],
                                           window_name="Combined static point clouds (in ego ref frame)")
-    #######################################################################################
 
+    ######################### static point cloud in world frame #############################
     unrefined_pc_global_list = [frame_dict['lidar_pc_global'] for frame_dict in dict_list]
     print(f"Extracted {len(unrefined_pc_global_list)} static point clouds (in world frame).")
-    # unrefined_sem_pc_global_list = [frame_dict['lidar_pc_with_semantic_global'] for frame_dict in dict_list]
-    # print(f"Extracted {len(unrefined_sem_pc_global_list)} semantic static point clouds (in world frame).")
-
     pc_global_combined_draw = np.concatenate(unrefined_pc_global_list, axis=0)
     print(f"Pc global shape: {pc_global_combined_draw.shape}")
 
@@ -3291,8 +3213,8 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         pc_global_to_draw.points = o3d.utility.Vector3dVector(pc_global_coordinates)
         o3d.visualization.draw_geometries([pc_global_to_draw],
                                           window_name="Combined static point clouds (in global frame)")
-    ######################################################################################
 
+    ######################### point cloud with all static and dynamic objects #################
     raw_pc_list = [frame_dict['raw_lidar_ego'] for frame_dict in dict_list]
     print(f"Extracted {len(raw_pc_list)} static and dynamic point clouds (in ego i frame).")
     raw_pc_list_sensor_ids = [frame_dict['raw_lidar_ego_sensor_ids'] for frame_dict in dict_list]
@@ -3312,7 +3234,6 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     ##################### Prepare lidar timestamps for Kiss-ICP ##########################
     # Extract timestamps associated with each frame's original ego pose
     try:
-        # Adjust key if needed based on your ego_pose dictionary structure
         lidar_timestamps = [frame_dict['sample_timestamp'] for frame_dict in dict_list]
         print(f"Extracted {len(lidar_timestamps)} timestamps.")
     except KeyError:
@@ -3341,12 +3262,6 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     mapmos_pipeline = None
     estimated_poses_kiss = None
     log_dir_mapmos = osp.join(save_path, scene_name, "mapmos_logs")
-
-    """mapmos_labels_per_scan = []
-    for point_cloud_in_frame in raw_pc_list:
-        num_points_in_frame = point_cloud_in_frame.shape[0]
-        random_labels_for_frame = np.random.randint(0, 2, size=(num_points_in_frame, 1), dtype=np.int32)
-        mapmos_labels_per_scan.append(random_labels_for_frame)"""
 
     mapmos_labels_per_scan = [frame_dict['mapmos_per_point_labels'] for frame_dict in dict_list]
 
@@ -3482,9 +3397,9 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                                       window_name=f"Final Static Points (Frame 0)")"""
 
 
-    poses_kiss_icp = None
     ###############################################################################################
     ################# Refinement using KISS-ICP ###################################################
+    poses_kiss_icp = None
     if args.icp_refinement and len(dict_list) > 1:
         print(f"--- Performing KISS-ICP refinement on static global point clouds for scene {scene_name} ---")
 
@@ -3720,30 +3635,18 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                     # Determine the source lists for aggregation based on ICP refinement
     if not args.icp_refinement:
         print("ICP refinement is OFF. Using unrefined points (in reference ego frame) for aggregation.")
-        # These are lists of (N, D) arrays, already in reference ego frame
         source_pc_list_all_frames = unrefined_pc_ego_ref_list
-        # source_sem_pc_list_all_frames = unrefined_sem_pc_ego_ref_list
         source_pc_sids_list_all_frames = unrefined_pc_ego_ref_list_sensor_ids
-        # source_sem_sids_list_all_frames = unrefined_sem_pc_ego_ref_list_sensor_ids
     else:
         print("ICP refinement is ON. Using KISS-ICP refined points for aggregation.")
-        # These are lists of (N, D) arrays, in the KISS-ICP refined global/map frame
         source_pc_list_all_frames = refined_lidar_pc_list
-        # source_sem_pc_list_all_frames = refined_lidar_pc_with_semantic_list
-        # SIDs lists for refined PCs are typically the same as their unrefined counterparts,
-        # as ICP only affects poses, not point identities or origins relative to sensor.
-        # IMPORTANT: Ensure these unrefined SIDs lists correspond to the frames in refined_lidar_pc_list
         source_pc_sids_list_all_frames = unrefined_pc_ego_list_sensor_ids  # SIDs from ego_i list
-        # source_pc_sids_list_all_frames = static_points_mapmos_sensor_ids
-        # source_sem_sids_list_all_frames = unrefined_sem_pc_ego_list_sensor_ids  # SIDs from ego_i list
 
     #################################### Filtering based on if only keyframes should be used ###########################
     print(f"Static map aggregation: --static_map_keyframes_only is {args.static_map_keyframes_only}")
 
     lidar_pc_list_for_concat = []
     lidar_pc_sids_list_for_concat = []
-    # lidar_pc_with_semantic_list_for_concat = []
-    # lidar_pc_with_semantic_sids_list_for_concat = []
 
     for idx, frame_info in enumerate(dict_list):
         is_key = frame_info['is_key_frame']
@@ -3760,28 +3663,17 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                 if idx < len(source_pc_sids_list_all_frames) and source_pc_sids_list_all_frames[idx].shape[0] > 0:
                     lidar_pc_sids_list_for_concat.append(source_pc_sids_list_all_frames[idx])
                 elif source_pc_list_all_frames[idx].shape[
-                    0] > 0:  # Points exist but SIDs might be empty if something went wrong
+                    0] > 0:
                     print(
                         f"Warning: Frame {idx} has {source_pc_list_all_frames[idx].shape[0]} static points but missing/empty SIDs.")
-
-            """# Add semantic static points
-            if idx < len(source_sem_pc_list_all_frames) and source_sem_pc_list_all_frames[idx].shape[0] > 0:
-                lidar_pc_with_semantic_list_for_concat.append(source_sem_pc_list_all_frames[idx])
-                if idx < len(source_sem_sids_list_all_frames) and source_sem_sids_list_all_frames[idx].shape[
-                    0] > 0:
-                    lidar_pc_with_semantic_sids_list_for_concat.append(source_sem_sids_list_all_frames[idx])
-                elif source_sem_pc_list_all_frames[idx].shape[0] > 0:
-                    print(
-                        f"Warning: Frame {idx} has {source_sem_pc_list_all_frames[idx].shape[0]} semantic points but missing/empty SIDs.")"""
         else:
             print(
                 f"  Skipping frame {idx} (Keyframe: {is_key}) for static map aggregation due to --static_map_keyframes_only.")
 
-    ###################################################################################################################
+    ################################### Concatenating the static point list ##############################################
 
     if lidar_pc_list_for_concat:
         print(f"Concatenating pc from {len(lidar_pc_list_for_concat)} frames")
-        # Concatenate along points axis (axis=0)
         lidar_pc_final_global = np.concatenate(lidar_pc_list_for_concat, axis=0)
         print(f"Concatenated refined static global points. Shape: {lidar_pc_final_global.shape}")
     else:
@@ -3799,57 +3691,29 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
     ################################## Visualization #############################################################
     if args.vis_aggregated_static_kiss_refined:
         visualize_pointcloud(lidar_pc_final_global, title=f"Aggregated Refined Static PC (Global) - Scene {scene_name}")
-    #############################################################################################################
-
-    ################## concatenate all semantic scene segments ########################
-    """if lidar_pc_with_semantic_list_for_concat:
-        print(f"Concatenating semantic pc from {len(lidar_pc_with_semantic_list_for_concat)} frames")
-        lidar_pc_with_semantic_final_global = np.concatenate(lidar_pc_with_semantic_list_for_concat,
-                                                             axis=0)  # Shape (N_total, Features)
-        print(f"Concatenated refined semantic global points. Shape: {lidar_pc_with_semantic_final_global.shape}")
-    else:
-        sys.exit()
-
-    if lidar_pc_with_semantic_sids_list_for_concat:
-        print(f"Concatenating pc from {len(lidar_pc_with_semantic_sids_list_for_concat)} frames")
-        lidar_pc_with_semantic_final_global_sensor_ids = np.concatenate(lidar_pc_with_semantic_sids_list_for_concat, axis=0)
-        print(f"Concatenated refined semantic static global point sensor ids. Shape: {lidar_pc_with_semantic_final_global_sensor_ids.shape}")
-    else:
-        sys.exit()
-
-    assert lidar_pc_with_semantic_final_global.shape[0] == lidar_pc_with_semantic_final_global_sensor_ids.shape[0]"""
-
     ####################################################################################################################
 
     lidar_pc = lidar_pc_final_global.T
-    # lidar_pc_with_semantic = lidar_pc_with_semantic_final_global.T
-
     lidar_pc_sensor_ids = lidar_pc_final_global_sensor_ids
-    # lidar_pc_with_semantic_sensor_ids = lidar_pc_with_semantic_final_global_sensor_ids
 
-    ########################################### Visualization #########################################################
+    ########################################### Visualization of 2 frames to see aligned ################################
     if args.vis_static_frame_comparison_kiss_refined:
-        # Define frames to visualize
         frame_indices_to_viz = [1, 25]  # Frame 1 (index 0), Frame 25 (index 24)
         colors = [
             [1.0, 0.0, 0.0],  # Red for frame 1
             [0.0, 0.0, 1.0]  # Blue for frame 25
         ]
 
-        # Check if the list is long enough
         if len(lidar_pc_list_for_concat) <= max(frame_indices_to_viz):
             print(
                 f"Error: refined_lidar_pc_list only has {len(lidar_pc_list_for_concat)} elements. Cannot access frame {max(frame_indices_to_viz) + 1}.")
-            # Handle error appropriately, maybe exit or skip visualization
-            sys.exit(1)  # Or 'pass' if you want to continue without this visualization
+            sys.exit(1)
 
         point_clouds_to_visualize = []
 
         for i, frame_idx in enumerate(frame_indices_to_viz):
-            # Get the point cloud for the specific frame
             pc_np = lidar_pc_list_for_concat[frame_idx]
 
-            # Ensure it's not empty and has the right dimensions
             if pc_np is None or pc_np.shape[0] == 0:
                 print(f"Warning: Point cloud for frame {frame_idx + 1} (index {frame_idx}) is empty. Skipping.")
                 continue
@@ -3858,19 +3722,14 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                     f"Warning: Point cloud for frame {frame_idx + 1} (index {frame_idx}) has unexpected shape {pc_np.shape}. Needs (N, >=3). Skipping.")
                 continue
 
-            # Extract XYZ coordinates (assuming they are the first 3 columns)
             xyz = pc_np[:, :3]
 
-            # Create Open3D point cloud object
             pcd = o3d.geometry.PointCloud()
             pcd.points = o3d.utility.Vector3dVector(xyz)
-
-            # Assign color
             pcd.paint_uniform_color(colors[i])
 
             point_clouds_to_visualize.append(pcd)
 
-        # Visualize if we have point clouds to show
         if point_clouds_to_visualize:
             print(
                 f"Visualizing Frame {frame_indices_to_viz[0] + 1} (Red) and Frame {frame_indices_to_viz[1] + 1} (Blue)...")
@@ -3892,35 +3751,16 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
                                                             location_msg="aggregated static points")
         lidar_pc = lidar_pc[:, kept_indices]
         lidar_pc_sensor_ids = lidar_pc_sensor_ids[kept_indices]
-        #lidar_pc_with_semantic = lidar_pc_with_semantic[:,
-         #                        kept_indices]  # Only here if lidar_pc and lidar_pc_semantics are the same
-        #lidar_pc_with_semantic_sensor_ids = lidar_pc_with_semantic_sensor_ids[kept_indices]
 
-
-    """if args.filter_aggregated_static_pc and args.filter_mode != 'none':
-        pcd_o3d = o3d.geometry.PointCloud()
-        pcd_o3d.points = o3d.utility.Vector3dVector(lidar_pc_with_semantic[:3, :].T)
-        denoise_pointcloud.location_msg = "aggregated static semantic points"
-        filtered_pcd_o3d, kept_indices = denoise_pointcloud(pcd_o3d, args.filter_mode, config)
-        lidar_pc_with_semantic = lidar_pc_with_semantic[:, kept_indices]"""  # Only needed if lidar_pc and lidar_pc are different pcs
-    ###################################################################################################################
-    # ensure each point has a sensor id
     assert lidar_pc.shape[1] == lidar_pc_sensor_ids.shape[0], (
         f"point count ({lidar_pc.shape[1]}) != sensor_ids count ({lidar_pc_sensor_ids.shape[0]})"
     )
 
-    """# ensure each semantic point has a sensor id
-    assert lidar_pc_with_semantic.shape[1] == lidar_pc_with_semantic_sensor_ids.shape[0], (
-        f"semantic point count ({lidar_pc_with_semantic.shape[1]}) != "
-        f"semantic_sensor_ids count ({lidar_pc_with_semantic_sensor_ids.shape[0]})"
-    )"""
-
     ############################## Visualization ######################################################
-
     if args.vis_filtered_aggregated_static:
         visualize_pointcloud(lidar_pc.T, title=f"Aggregated Refined Static PC (Global) - Scene {scene_name}")
-    ###################################################################################################
 
+    ############################### adapt dict_list to only use keyframes #################################
     source_dict_list_for_objects = dict_list
 
     if args.dynamic_map_keyframes_only:
@@ -3934,93 +3774,26 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
     print(f"Dynamic object aggregation will use {len(source_dict_list_for_objects)} frames.")
 
-    ############################# Old aggregation logic #################################
-    """
-    ################## concatenate all object segments (including non-key frames)  ########################
-    object_token_zoo = []  # stores unique object tokens from all frames
-    object_semantic = []  # stores semantic category corresponding to each unique object
-    for frame_dict in source_dict_list_for_objects:  # Iterate through frames and collect unique objects
-        for i, object_token in enumerate(frame_dict['object_tokens']):
-            if object_token not in object_token_zoo:  # Filter and append object tokens
-                if (frame_dict['object_points_list'][i].shape[
-                    0] > 0):  # only appends objects that have at least one point
-                    object_token_zoo.append(object_token)
-                    object_semantic.append(frame_dict['converted_object_category'][i])
-                else:
-                    continue
-
-    object_points_dict = {}  # initialize an empty dictionary to hold aggregated object points
-    object_sids_dict = {}
-
-    print("\nAggregating object points...")
-    for query_object_token in tqdm(object_token_zoo,
-                                   desc="Aggregating Objects"):  # Loop through each unique object token
-        canonical_segments_list = []
-        canonical_segments_sids_list = []
-        for frame_dict in source_dict_list_for_objects:  # iterates through all frames
-            if query_object_token in frame_dict['object_tokens']:  # Check if the object exists in this frame
-                obj_idx = frame_dict['object_tokens'].index(query_object_token)  # Find its index
-                object_points = frame_dict['object_points_list'][obj_idx]  # retrieve raw object points
-                object_points_sids = frame_dict['object_points_list_sensor_ids'][obj_idx]
-
-                if object_points is not None and object_points.shape[0] > 0:
-                    # Canonicalization: Translate to center and rotate based on box yaw
-                    center = frame_dict['gt_bbox_3d'][obj_idx][:3]
-                    yaw = frame_dict['gt_bbox_3d'][obj_idx][6]
-                    translated_points = object_points[:, :3] - center  # Use only XYZ
-                    if translated_points.shape[0] > 0:
-                        Rot = Rotation.from_euler('z', -yaw, degrees=False)
-                        rotated_object_points = Rot.apply(translated_points)  # Canonical segment (N_seg, 3)
-                        if rotated_object_points.shape[0] > 0:
-                            canonical_segments_list.append(rotated_object_points)  # Add segment to the list
-                            canonical_segments_sids_list.append(object_points_sids)
-
-        if canonical_segments_list:
-            object_points_dict[query_object_token] = np.concatenate(canonical_segments_list, axis=0)
-            object_sids_dict[query_object_token] = np.concatenate(canonical_segments_sids_list, axis=0)
-        else:
-            object_points_dict[query_object_token] = np.zeros((0, 3), dtype=float)
-            object_sids_dict[query_object_token] = np.zeros((0,), dtype=int)
-
-    object_data = []  # Stores all unique objects across frames
-
-    for idx, token in enumerate(object_token_zoo):
-        obj = {
-            "token": token,
-            "points": object_points_dict[token][:, :3],  # Canonicalized x, y, z
-            "points_sids": object_sids_dict[token],
-            "semantic": object_semantic[idx]  # Integer category
-        }
-        object_data.append(obj)
-    """
-
-    ###################################### Loop to save data per frame ########################################
-    # Loop over frames to process scene
+    ###################################### Loop to save occupancy data per frame ######################################
     tranforms_ref_to_k = []
     i = 0
-    while int(i) < 10000:  # Assuming the sequence does not have more than 10000 frames to avoid infinite loops
+    while int(i) < 1000:
         print(f"Processing frame {i} for saving")
-        if i >= len(dict_list):  # If the frame index exceeds the number of frames in the scene exit the function
+        if i >= len(dict_list):
             print('finish scene!')
             return
-        frame_dict = dict_list[i]  # retrieves dictionary corresponding to the current frame
+        frame_dict = dict_list[i]
         # Only processes key frames since non-key frames do not have ground truth annotations
         is_key_frame = frame_dict['is_key_frame']
-        if not is_key_frame:  # only use key frame as GT
+        if not is_key_frame:
             i = i + 1
-            continue  # skips to the next frame if not a key frame
+            continue
 
-        # extract points from transformed point clouds
-        point_cloud = lidar_pc[:3,
-                      :]  # extract transformed static points, T to switch dims from (3,N) to (N, 3)
-        # point_cloud_with_semantic = lidar_pc_with_semantic  # retrieves transformed semantic points with labels (N, 4): [x, y, z, label]
+        point_cloud = lidar_pc[:3, :]
         point_cloud_sensor_ids = lidar_pc_sensor_ids
-        # point_cloud_with_semantic_sensor_ids = lidar_pc_with_semantic_sensor_ids
         print(f"Original point_cloud: {point_cloud.shape} with sensor ids: {point_cloud_sensor_ids.shape}")
-        #print(
-         #   f"Original semantic point_cloud: {point_cloud_with_semantic.shape} with sensor ids: {point_cloud_with_semantic_sensor_ids.shape}")
 
-        # === Transform back to ego frame ===
+        ############################## Transform points into common reference frame i ############################
         sample = truckscenes.get('sample', frame_dict['sample_token'])
         ego_pose = truckscenes.getclosest('ego_pose', sample['timestamp'])
         ego_from_global = transform_matrix(ego_pose['translation'], Quaternion(ego_pose['rotation']), inverse=True)
@@ -4043,129 +3816,19 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             T_k_from_ref = np.linalg.inv(T_ref_from_k)
             tranforms_ref_to_k.append(T_ref_from_k)
 
-        # Get global point clouds for this iteration (use copies to avoid modifying originals accidentally)
-        point_cloud_global_xyz = lidar_pc[:3, :].copy()  # Global static XYZ (3, N)
-        # point_cloud_global_xyzl = lidar_pc_with_semantic.copy()  # Global static XYZ+L (4+, N)
+        point_cloud_global_xyz = lidar_pc[:3, :].copy()
         print(f"Global point_cloud shape: {point_cloud_global_xyz.shape}")
-        # print(f"Global semantic point_cloud shape: {point_cloud_global_xyzl.shape}")
 
-        # --- Transform scene static points (point_cloud) ---
         if point_cloud_global_xyz.shape[1] > 0:
-            points_homo = np.hstack((point_cloud_global_xyz.T, np.ones((point_cloud_global_xyz.shape[1], 1))))  # (N, 4)
-            points_k_ego = (T_k_from_ref @ points_homo.T).T[:, :3]  # Shape (N, 4)
-            # Assign the result to the loop-local variable 'point_cloud'
-            point_cloud = points_k_ego.T  # Ego coords (3, N)
+            points_homo = np.hstack((point_cloud_global_xyz.T, np.ones((point_cloud_global_xyz.shape[1], 1))))
+            points_k_ego = (T_k_from_ref @ points_homo.T).T[:, :3]
+            point_cloud = points_k_ego.T
         else:
             point_cloud = np.zeros((3, 0), dtype=point_cloud_global_xyz.dtype)
 
-        """# --- Transform semantic points as well (point_cloud_with_semantic) ---
-        if point_cloud_global_xyzl.shape[1] > 0:
-            # Create homogeneous coords from the global semantic points' XYZ
-            sem_homo = np.hstack(
-                (point_cloud_global_xyzl[:3, :].T, np.ones((point_cloud_global_xyzl.shape[1], 1))))  # (N, 4)
-            # Perform transformation to get ego XYZ
-            sem_ego_xyz = (T_k_from_ref @ sem_homo.T).T[:, :3]  # (N, 3) - contains ego XYZ
-
-            # --- Create the NEW ego semantic array ---
-            # Combine the new ego XYZ with the original labels/features (from row 3 onwards)
-            point_cloud_with_semantic_ego = np.vstack((
-                sem_ego_xyz.T,  # New Ego XYZ (3, N)
-                point_cloud_global_xyzl[3:, :]  # Original Labels/Features (1+, N)
-            ))
-            # Assign the newly created array to the loop-local variable
-            point_cloud_with_semantic = point_cloud_with_semantic_ego  # Ego coords + Labels (4+, N)
-
-        else:
-            # Handle empty case - ensure correct number of rows if needed
-            num_sem_rows = lidar_pc_with_semantic.shape[0]  # Get original number of rows
-            point_cloud_with_semantic = np.zeros((num_sem_rows, 0), dtype=lidar_pc_with_semantic.dtype)"""
-
-        # Prints after transformation:
         print(f"Ego point_cloud shape: {point_cloud.shape} with sensor ids: {point_cloud_sensor_ids.shape}")
-        # Optional: print first few points' ego coords: print(point_cloud[:,:5])
-        """print(
-            f"Ego semantic point_cloud shape: {point_cloud_with_semantic.shape} with sensor ids: {point_cloud_with_semantic_sensor_ids.shape}")
-        # Optional: print first few points' ego coords + labels: print(point_cloud_with_semantic[:,:5])
 
-        assert point_cloud.shape[1] == point_cloud_with_semantic.shape[1], \
-            f"Ego point counts mismatch after transform: {point_cloud.shape[1]} vs {point_cloud_with_semantic.shape[1]}"
-        """
         assert point_cloud.shape[1] == point_cloud_sensor_ids.shape[0]
-
-        """################## load bbox of target frame ##############
-        sample = truckscenes.get('sample', frame_dict['sample_token'])
-        boxes = get_boxes(truckscenes, sample)
-
-        locs = np.array([b.center for b in boxes]).reshape(-1, 3)
-        dims = np.array([b.wlh for b in boxes]).reshape(-1, 3)
-        rots = np.array([b.orientation.yaw_pitch_roll[0] for b in boxes]).reshape(-1, 1)
-
-        gt_bbox_3d = np.concatenate([locs, dims, rots], axis=1).astype(np.float32)
-
-        boxes_token = [box.token for box in boxes]  # retrieves a list of tokens from the bounding box
-        # Extract object tokens. Each instance token represents a unique object
-
-        # Extract object tokens. Each instance token represents a unique object
-        object_tokens = [truckscenes.get('sample_annotation', box_token)['instance_token'] for box_token in
-                         boxes_token]  # Uses sample_annotation data to get instance_token fore each bb
-        # Extract object categories
-        object_category = [truckscenes.get('sample_annotation', box_token)['category_name'] for box_token in
-                           boxes_token]  # retrieves category name for each bounding box
-
-        ############################# get object categories ##########################
-        converted_object_category = []  # Initialize empty list
-
-        # Iterate over each object category extracted earlier
-        for category in object_category:
-            found_match = False
-            # Iterate over label mappings defined in truckscenes.yaml file
-            for label_key, label_name_in_yaml in truckscenesyaml['labels'].items():
-                # Check category and map to learning label
-                if category == label_name_in_yaml:
-                    mapped_label_index = learning_map.get(label_key)
-                    if mapped_label_index is not None:
-                        converted_object_category.append(mapped_label_index)
-                        found_match = True
-                        break  # Found the mapping, move to the next category
-                    else:
-                        # This case means label_key exists in 'labels' but not 'learning_map'
-                        print(
-                            f"Warning: Category '{category}' mapped to label_key '{label_key}', but '{label_key}' not found in learning_map. Using 'Unknown' label.")
-                        # --- CHANGE: Use UNKNOWN_LEARNING_INDEX ---
-                        converted_object_category.append(UNKNOWN_LEARNING_INDEX)
-                        found_match = True
-                        break
-
-            # If the category was not found in the truckscenesyaml['labels'] mapping at all
-            if not found_match:
-                print(
-                    f"Warning: Category '{category}' not found in truckscenes.yaml mapping. Using 'Unknown' label.")
-                # --- CHANGE: Use UNKNOWN_LEARNING_INDEX ---
-                converted_object_category.append(UNKNOWN_LEARNING_INDEX)"""
-
-        """labels_array = np.array(converted_object_category).reshape(-1, 1)
-
-        # Check if the number of labels matches the number of boxes
-        if locs.shape[0] == labels_array.shape[0]:
-            # Concatenate geometric data AND the labels array
-            # Resulting shape will be (N, 3+3+1+1) = (N, 8)
-            gt_bbox_3d_with_labels = np.concatenate([locs, dims, rots, labels_array], axis=1).astype(np.float32)
-
-            # ---- EXPORT gt_bbox_3d (derived from boxes) ----
-            # Create a unique filename using the frame index 'i'
-            gt_bbox_filename = f'frame_{i}_gt_bbox_3d_labeled.npy'
-            dirs = os.path.join(save_path, scene_name, frame_dict['sample_token'])  #### Save in folder with scene name
-            if not os.path.exists(dirs):  # create directory if does not exist
-                os.makedirs(dirs)
-            output_filepath_bbox = os.path.join(dirs, gt_bbox_filename)
-            np.save(output_filepath_bbox, gt_bbox_3d_with_labels)
-            print(f"Saved bounding box data for frame {i} to {output_filepath_bbox}")
-            print(f"Saved array shape: {gt_bbox_3d_with_labels.shape}")
-        else:
-            print(
-                f"ERROR: Mismatch between number of boxes ({locs.shape[0]}) and number of labels ({labels_array.shape[0]}) for frame {i}. Skipping save.")
-
-            # ------------------------------------------------"""
 
         ################ load boxes of target frame ############################
         gt_bbox_3d_unmodified = frame_dict['gt_bbox_3d_unmodified']
@@ -4176,20 +3839,17 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
         gt_bbox_3d_points_in_boxes_cpu_enlarged_filter = frame_dict['gt_bbox_3d_points_in_boxes_cpu_enlarged']
 
-        ################## bbox placement ##############
+        ################## Aggregation of object points for the current frame #####################
         current_keyframe_object_tokens = frame_dict['object_tokens']
         current_keyframe_gt_bboxes = frame_dict['gt_bbox_3d_overlap_enlarged']
         current_keyframe_object_categories = frame_dict['converted_object_category']
 
-        # These lists will store the final point clouds for dynamic objects for THIS scene
-        dynamic_object_points_list = []  # Final transformed points for scene
+        dynamic_object_points_list = []  # Final transformed object points for scene
         dynamic_object_points_sids_list = []
         dynamic_object_points_semantic_list = []  # Final semantic-labeled points for scene
         dynamic_object_points_semantic_sids_list = []
 
-        # Iterate through each object present in THIS keyframe `i`
         for keyframe_obj_idx, current_object_token in enumerate(current_keyframe_object_tokens):
-            # Get the object's class ID and name for logging
             class_id = current_keyframe_object_categories[keyframe_obj_idx]
             class_name = learning_id_to_name.get(class_id, 'Unknown')  # Safely get the name
             short_token = current_object_token.split('-')[0]
@@ -4197,21 +3857,17 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
             print(f"  Processing dynamic object: {class_name} ('{short_token}...') for keyframe {i}...")
 
             # --- 1. Get the interaction signature for the object in THIS keyframe ---
-            # We pass `frame_dict` which is `dict_list[i]`
             signature_at_keyframe_i = get_object_overlap_signature_BATCH(frame_dict, keyframe_obj_idx)
 
             if signature_at_keyframe_i:
-                # Create a temporary map to resolve tokens to names for the signature string
                 token_to_name_map = {
                     tok: learning_id_to_name.get(cat_id, 'Unknown')
                     for tok, cat_id in zip(current_keyframe_object_tokens, current_keyframe_object_categories)
                 }
-                # Now build the descriptive signature string
                 sig_str = ", ".join([f"({iou:.4f}, {learning_id_to_name.get(cat_id, '?')}, {yaw:.4f} rad)"
                                      for iou, tok, cat_id, yaw in signature_at_keyframe_i])
                 print(f"    Signature for '{class_name}': [{sig_str}]")
 
-            # These will collect points from all frames with a similar context
             contextual_canonical_segments = []
             contextual_canonical_sids_segments = []
 
@@ -4332,46 +3988,6 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
         # --- Final Scene Assembly for frame i ---
         print("\n  Assembling final scene for saving...")
 
-        """# Find matching object entry
-        for obj in object_data:
-            if current_object_token == obj["token"]:
-                points = obj["points"]  # Canonical (x, y, z)
-                points_sids = obj["points_sids"]
-
-                # Rotate and translate object points to place back into current scene
-                Rot = Rotation.from_euler('z', rots[keyframe_obj_idx], degrees=False)
-                rotated_object_points = Rot.apply(points)
-                points = rotated_object_points + locs[keyframe_obj_idx]  # Translate to bbox center
-
-                # Filter points inside bounding box
-                if points.shape[0] >= 5:
-                    original_count = points.shape[0]
-                    points_in_boxes = points_in_boxes_cpu(
-                        torch.from_numpy(points[np.newaxis, :, :]),
-                        torch.from_numpy(gt_bbox_3d[keyframe_obj_idx:keyframe_obj_idx + 1][np.newaxis, :])
-                    )
-                    points = points[points_in_boxes[0, :, 0].bool()]
-                    points_sids = points_sids[points_in_boxes[0, :, 0].bool()]
-
-                    assert points.shape[0] == points_sids.shape[0]
-
-                    filtered_count = points.shape[0]
-                    if original_count > filtered_count:
-                        print(
-                            f"[Box Filter] Object {current_object_token}: reduced points from {original_count} to {filtered_count}")
-
-                # Append only if points remain
-                if points.shape[0] > 0:
-                    dynamic_object_points_list.append(points)
-                    dynamic_object_points_sids_list.append(points_sids)
-
-                    semantics = np.ones((points.shape[0], 1)) * obj["semantic"]
-                    points_with_semantics = np.concatenate([points, semantics], axis=1)
-                    dynamic_object_semantic_list.append(points_with_semantics)
-                    dynamic_object_semantic_sids_list.append(points_sids)
-
-                break  # No need to check further once matched"""
-
         if args.vis_static_before_combined_dynamic:
             visualize_pointcloud_bbox(point_cloud.T,
                                       boxes=boxes,
@@ -4389,7 +4005,6 @@ def main(trucksc, val_list, indice, truckscenesyaml, args, config):
 
 
         ######################################## Cleanup of overlapping box labels #######################################
-
         # --- Step 1: Aggregate all dynamic points and their initial labels ---
         dyn_points = np.concatenate(dynamic_object_points_list)
         dyn_points_sids = np.concatenate(dynamic_object_points_sids_list)
@@ -5022,8 +4637,6 @@ if __name__ == '__main__':
     parse.add_argument('--dataroot', type=str,
                        default='./data/truckscenes/')  # data root path, default: "./data/truckScenes
     parse.add_argument('--version', type=str, default='v1.0-trainval')
-    parse.add_argument('--trucksc_val_list', type=str,
-                       default='./truckscenes_val_list.txt')  # text file containing validation scene tokens, default: "./truckscenes_val_list.txt"
     parse.add_argument('--label_mapping', type=str,
                        default='truckscenes.yaml')  # YAML file containing label mappings, default: "truckscenes.yaml"
 
@@ -5072,18 +4685,10 @@ if __name__ == '__main__':
     args = parse.parse_args()
 
     if args.dataset == 'truckscenes':  # check dataset type
-        val_list = []
-        with open(args.trucksc_val_list, 'r') as file:  # Load validation scene tokens to val_list
-            for item in file:
-                val_list.append(item[:-1])
-        file.close()
-
         # Load the truckScenes dataset
         truckscenes = TruckScenes(version=args.version,
                                   dataroot=args.dataroot,
-                                  verbose=True)  # verbose True to print informational messages
-        train_scenes = splits.train  # train_scenes and val_scenes contain the scene tokens for the training and validation splits
-        val_scenes = splits.val
+                                  verbose=True)
     else:
         raise NotImplementedError
 
@@ -5101,10 +4706,9 @@ if __name__ == '__main__':
         print('processing sequence:', i)
         # call the main function
         # Inputs: nusc: initialized truckscenes dataset object
-        # val_list: list of validation scene tokens
         # indice: current scene index
         # truckscenesyaml: loaded label mapping
         # args: parsed command-line arguments
         # config: configuration settings
-        main(truckscenes, val_list, indice=i,
+        main(truckscenes, indice=i,
              truckscenesyaml=truckscenesyaml, args=args, config=config)
