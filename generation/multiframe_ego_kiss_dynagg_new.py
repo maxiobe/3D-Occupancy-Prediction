@@ -4066,14 +4066,32 @@ def main(trucksc, indice, truckscenesyaml, args, config):
 
                 # Only filter if there are points to filter
                 if original_count > 0:
-                    points_in_box_mask = points_in_boxes_cpu(
+                    # Prepare tensors for the operation
+                    points_tensor = torch.from_numpy(points_in_scene_xyz[np.newaxis, :, :]).float()
+                    box_tensor = torch.from_numpy(bbox_for_filtering[np.newaxis, :, :]).float()
+
+                    # Get the box indices for each point
+                    box_indices_tensor = points_in_boxes_cpu(points_tensor, box_tensor)
+
+                    # --- FIX 1: Correctly create the boolean mask ---
+                    # A point is inside if its box index is 0 or greater.
+                    points_in_box_mask = (box_indices_tensor[0, :, 0] >= 0)
+
+                    # --- FIX 2: Make indexing robust by converting the mask to a NumPy array ---
+                    points_in_box_mask_numpy = points_in_box_mask.cpu().numpy()
+
+                    # Apply the corrected and safe NumPy mask
+                    points_in_scene_xyz = points_in_scene_xyz[points_in_box_mask_numpy]
+                    sids_for_points = sids_for_points[points_in_box_mask_numpy]
+
+                    """points_in_box_mask = points_in_boxes_cpu(
                         torch.from_numpy(points_in_scene_xyz[np.newaxis, :, :]),
                         torch.from_numpy(bbox_for_filtering[np.newaxis, :, :])
                     )[0, :, 0].bool()
 
                     # Apply the mask to the points and their corresponding sensor IDs
                     points_in_scene_xyz = points_in_scene_xyz[points_in_box_mask]
-                    sids_for_points = sids_for_points[points_in_box_mask]
+                    sids_for_points = sids_for_points[points_in_box_mask]"""
 
                     filtered_count = points_in_scene_xyz.shape[0]
                     if original_count > filtered_count:
