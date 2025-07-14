@@ -2447,6 +2447,32 @@ def assign_label_by_L_shape(
 
     return new_labels.reshape(-1, 1), reassigned_point_indices
 
+def integrate_imu_for_relative_motion(imu_data_prev, imu_data_curr, dt_sec):
+    if dt_sec <= 0:  # Prevent division by zero or backward time
+        return np.eye(4)
+
+    avg_vx = (imu_data_prev['vx'] + imu_data_curr['vx']) / 2.0
+    avg_vy = (imu_data_prev['vy'] + imu_data_curr['vy']) / 2.0
+    avg_vz = (imu_data_prev['vz'] + imu_data_curr['vz']) / 2.0
+
+    translation_vec = np.array([avg_vx * dt_sec, avg_vy * dt_sec, avg_vz * dt_sec])
+
+    avg_roll_rate = (imu_data_prev['roll_rate'] + imu_data_curr['roll_rate']) / 2.0
+    avg_pitch_rate = (imu_data_prev['pitch_rate'] + imu_data_curr['pitch_rate']) / 2.0
+    avg_yaw_rate = (imu_data_prev['yaw_rate'] + imu_data_curr['yaw_rate']) / 2.0
+
+    d_roll = avg_roll_rate * dt_sec
+    d_pitch = avg_pitch_rate * dt_sec
+    d_yaw = avg_yaw_rate * dt_sec
+
+    delta_rotation_matrix = Rotation.from_euler('zyx', [d_yaw, d_pitch, d_roll]).as_matrix()
+
+    relative_motion_matrix = np.eye(4)
+    relative_motion_matrix[:3, :3] = delta_rotation_matrix
+    relative_motion_matrix[:3, 3] = translation_vec
+
+    return relative_motion_matrix
+
 def main(trucksc, indice, truckscenesyaml, args, config):
 
     ########################## Extract parameters from config and args #############################################
@@ -3409,6 +3435,86 @@ def main(trucksc, indice, truckscenesyaml, args, config):
         estimated_poses_kiss = None  # Will hold the results from pipeline.poses
         log_dir_kiss = osp.join(save_path, scene_name, "kiss_icp_logs")
 
+        initial_relative_motions = []  # This will be a list of 4x4 numpy arrays
+
+        if args.initial_guess_mode == 'ego_pose':
+            print("Using 'ego_pose' for initial guesses.")
+
+            if not dict_list:
+                print("Warning: dict_list is empty. Cannot generate 'ego_pose' initial guesses.")
+            else:
+                initial_relative_motions.append(np.eye(4))
+                print(f"  Frame 0 (batch index 0): Initial guess is Identity (ego_pose mode anchor).")
+
+                for k_dict_idx in range(1, len(dict_list)):  # k_dict_idx is the index in dict_list
+                    # Global pose of previous frame (k-1) from dataset
+                    ego_pose_prev_dict = dict_list[k_dict_idx - 1]['ego_pose']
+                    P_dataset_prev_global = transform_matrix(
+                        ego_pose_prev_dict['translation'],
+                        Quaternion(ego_pose_prev_dict['rotation']),
+                        inverse=False
+                    )
+
+                    # Global pose of current frame (k) from dataset
+                    ego_pose_curr_dict = dict_list[k_dict_idx]['ego_pose']
+                    P_dataset_curr_global = transform_matrix(
+                        ego_pose_curr_dict['translation'],
+                        Quaternion(ego_pose_curr_dict['rotation']),
+                        inverse=False
+                    )
+
+                    try:
+                        P_dataset_prev_global_inv = np.linalg.inv(P_dataset_prev_global)
+                        # This is T_curr_from_prev_dataset = (P_prev_dataset)^-1 * P_curr_dataset
+                        relative_motion_from_dataset = P_dataset_prev_global_inv @ P_dataset_curr_global
+                        initial_relative_motions.append(relative_motion_from_dataset)
+                    except np.linalg.LinAlgError:
+                        print(
+                            f"  Warning: Singular matrix for ego_pose at dict_list index {k_dict_idx - 1}. Appending Identity for relative motion.")
+                        initial_relative_motions.append(np.eye(4))
+
+            print(f"  Generated {len(initial_relative_motions)} initial guesses from 'ego_pose'.")
+
+        elif args.initial_guess_mode == 'imu':
+            print("Using 'IMU' for initial guesses.")
+
+            if not dict_list:
+                print("Warning: dict_list is empty. Cannot generate 'IMU' initial guesses.")
+            else:
+                initial_relative_motions.append(np.eye(4))
+                print(f"  Frame 0 (batch index 0): Initial guess is Identity (IMU mode anchor).")
+
+                # For subsequent frames k > 0
+                for k in range(1, len(dict_list)):
+                    frame_data_prev = dict_list[k - 1]
+                    frame_data_curr = dict_list[k]
+
+                    imu_data_prev = frame_data_prev.get(
+                        'ego_motion_chassis')
+                    imu_data_curr = frame_data_curr.get('ego_motion_chassis')
+                    ts_prev = frame_data_prev['sample_timestamp']
+                    ts_curr = frame_data_curr['sample_timestamp']
+
+                    if imu_data_prev and imu_data_curr:
+                        dt_sec = (ts_curr - ts_prev) / 1e6
+                        if dt_sec > 1e-6:  # Check for valid positive time difference
+                            relative_motion_imu = integrate_imu_for_relative_motion(imu_data_prev, imu_data_curr,
+                                                                                    dt_sec)
+                            initial_relative_motions.append(relative_motion_imu)
+                        else:
+                            print(f"  Warning: dt_sec is {dt_sec} for frame {k}. Appending Identity for IMU guess.")
+                            initial_relative_motions.append(np.eye(4))
+                    else:
+                        print(
+                            f"  Warning: Missing IMU data for frame index {k - 1} or {k} in dict_list. Appending Identity.")
+                        initial_relative_motions.append(np.eye(4))  # Fallback
+
+                    print(f"  Generated {len(initial_relative_motions)} initial guesses from 'IMU'.")
+        else:
+            print("Initial guess mode is 'none' or invalid. KISS-ICP will use its default constant velocity model.")
+            # initial_relative_motions remains empty, so OdometryPipeline will pass None.
+            pass
+
         try:
             icp_input_pc_list = [frame_dict['lidar_pc_for_icp_ego_i'] for frame_dict in dict_list]
             print(f"Preparing InMemoryDataset for KISS-ICP with {len(icp_input_pc_list)} pre-filtered scans.")
@@ -3429,7 +3535,7 @@ def main(trucksc, indice, truckscenesyaml, args, config):
         if args.icp_refinement and in_memory_dataset:
             try:
                 kiss_config_path = Path('kiss_config.yaml')  # Ensure this file exists
-                pipeline = OdometryPipeline(dataset=in_memory_dataset, config=kiss_config_path)
+                pipeline = OdometryPipeline(dataset=in_memory_dataset, config=kiss_config_path, initial_guesses_relative=initial_relative_motions)
                 print("KISS-ICP pipeline initialized.")
             except Exception as e:
                 print(f"Error initializing KISS-ICP: {e}. Skipping refinement.")
@@ -4649,6 +4755,7 @@ if __name__ == '__main__':
 
     ####################### Kiss-ICP refinement ##########################################
     parse.add_argument('--icp_refinement', action='store_true', help='Enable ICP refinement')
+    parse.add_argument('--initial_guess_mode', type=str, default='none', choices=['none', 'ego_pose', 'imu'])
     parse.add_argument('--pose_error_plot', action='store_true', help='Plot pose error')
 
     ####################### Meshing #####################################################
