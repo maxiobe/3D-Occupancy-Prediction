@@ -4012,11 +4012,12 @@ def main(trucksc, indice, truckscenesyaml, args, config):
         dyn_points_semantic = np.concatenate(dynamic_object_points_semantic_list)
         dyn_points_semantic_sids = np.concatenate(dynamic_object_points_semantic_sids_list)
 
-        visualize_pointcloud_bbox(dyn_points_semantic,
-                                  boxes=boxes,
-                                  title=f"Fused dynamic and static PC + BBoxes + Ego BBox - Frame {i}",
-                                  self_vehicle_range=self_range,
-                                  vis_self_vehicle=True)
+        if args.vis_dyn_before_reassignment:
+            visualize_pointcloud_bbox(dyn_points_semantic,
+                                      boxes=boxes,
+                                      title=f"Fused dynamic and static PC + BBoxes + Ego BBox - Frame {i}",
+                                      self_vehicle_range=self_range,
+                                      vis_self_vehicle=True)
 
         print("--- Performing L-Shape Refinement on Aggregated Scene Points ---")
 
@@ -4037,13 +4038,14 @@ def main(trucksc, indice, truckscenesyaml, args, config):
         overlap_idxs = np.where(point_counts > 1)[0]
 
         if len(overlap_idxs) > 0:
-            viz_cloud_ambiguous = dyn_points_semantic.copy()
-            viz_cloud_ambiguous[overlap_idxs, 3] = 20
-            visualize_pointcloud_bbox(viz_cloud_ambiguous,
-                                      boxes=boxes,
-                                      title=f"All Ambiguous Points Highlighted - Frame {i}",
-                                      self_vehicle_range=self_range,
-                                      vis_self_vehicle=True)
+            if args.vis_dyn_ambigious_points:
+                viz_cloud_ambiguous = dyn_points_semantic.copy()
+                viz_cloud_ambiguous[overlap_idxs, 3] = 20
+                visualize_pointcloud_bbox(viz_cloud_ambiguous,
+                                          boxes=boxes,
+                                          title=f"All Ambiguous Points Highlighted - Frame {i}",
+                                          self_vehicle_range=self_range,
+                                          vis_self_vehicle=True)
 
             print(f"Found {len(overlap_idxs)} ambiguous points in the final aggregated cloud.")
             pt_to_box_map = defaultdict(list)
@@ -4075,12 +4077,12 @@ def main(trucksc, indice, truckscenesyaml, args, config):
             unreassigned_indices = np.setdiff1d(overlap_idxs, reassigned_indices)
             viz_cloud_unreassigned[unreassigned_indices, 3] = 20
 
-            visualize_pointcloud_bbox(viz_cloud_unreassigned,
-                                      boxes=boxes,
-                                      title=f"Unreassigned Ambiguous Points Highlighted - Frame {i}",
-                                      self_vehicle_range=self_range,
-                                      vis_self_vehicle=True)
-
+            if args.vis_dyn_unreassigned_points:
+                visualize_pointcloud_bbox(viz_cloud_unreassigned,
+                                          boxes=boxes,
+                                          title=f"Unreassigned Ambiguous Points Highlighted - Frame {i}",
+                                          self_vehicle_range=self_range,
+                                          vis_self_vehicle=True)
 
             print(f"Refinement complete. {len(reassigned_indices)} dynamic points were reassigned.")
         else:
@@ -4676,7 +4678,10 @@ if __name__ == '__main__':
     parse.add_argument('--vis_static_frame_comparison_kiss_refined', action='store_true', help='Enable static frame comparison kiss refinement')
     parse.add_argument('--vis_aggregated_static_kiss_refined', action='store_true', help='Enable aggregated static kiss refinement')
     parse.add_argument('--vis_filtered_aggregated_static', action='store_true', help='Enable filtered aggregated static kiss refinement')
-    parse.add_argument('--vis_static_before_combined_dynamic', action='store_true', help='Enable static pc visualization before combined with dynmanic points')
+    parse.add_argument('--vis_static_before_combined_dynamic', action='store_true', help='Enable static pc visualization before combined with dynamic points')
+    parse.add_argument('--vis_dyn_before_reassignment', action='store_true', help='Enable dynamic points visualization before reassignment')
+    parse.add_argument('--vis_dyn_ambigious_points', action='store_true', help='Enable dynamic ambigious points visualization')
+    parse.add_argument('--vis_dyn_unreassigned_points', action='store_true', help='Enable dynamic unreassigned points visualization')
     parse.add_argument('--vis_combined_static_dynamic_pc', action='store_true', help='Enable combined static and dynamic pc visualization')
 
     parse.add_argument('--vis_lidar_visibility', action='store_true', help='Enable lidar visibility visualization')
