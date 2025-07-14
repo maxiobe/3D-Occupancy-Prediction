@@ -13,12 +13,13 @@
 
 # Voxel parameters
 'voxel_size': 0.2 #0.4 # 0.5
-'occ_size':  [400, 400, 125]
+# 'occ_size':  [400, 400, 125]
+'occ_size': [1500, 1500, 125]
 
 # Parameters for ranges
-# 'self_range': [3.0, 3.0, 3.0]
 'self_range': [-1.5, -1.5, -1.0, 6.3, 1.5, 4.2]
-'pc_range':  [-40, -40, -5, 40, 40, 20]
+# 'pc_range':  [-40, -40, -5, 40, 40, 20]
+'pc_range': [-150, -150, -5, 150, 150, 20]
 
 # Filtering parameters
 # Filtering statistical outlier removal:
