@@ -2516,11 +2516,10 @@ def main(trucksc, indice, truckscenesyaml, args, config):
     print(f"Processing scene: {scene_name}")
     scene_description = my_scene['description']
     print(f"Scene description: {scene_description}")
-    # load the first sample from a scene to start
     first_sample_token = my_scene[
-        'first_sample_token']  # access the first sample token: contains token of first frame of the scene
+        'first_sample_token']
     my_sample = trucksc.get('sample',
-                            first_sample_token)  # retrieve the first sample as dictionary. Dictionary includes data from multiple sensors
+                            first_sample_token)
 
     ############################# Find weather in scene description for lidar intensity filtering ####################
     # find the part that starts with "weather."
@@ -2745,21 +2744,20 @@ def main(trucksc, indice, truckscenesyaml, args, config):
 
         ############################# get bbox attributes ##########################
         locs = np.array([b.center for b in boxes_ego]).reshape(-1,
-                                                               3)  # gets center coordinates (x,y,z) of each bb
+                                                               3)
         dims = np.array([b.wlh for b in boxes_ego]).reshape(-1,
-                                                            3)  # extract dimension width, length, height of each bb
-        rots = np.array([b.orientation.yaw_pitch_roll[0]  # extract rotations (yaw angles)
+                                                            3)
+        rots = np.array([b.orientation.yaw_pitch_roll[0]
                          for b in boxes_ego]).reshape(-1, 1)
 
         ########################## Bounding boxes without any modifications ########################
 
         gt_bbox_3d_unmodified = np.concatenate([locs, dims, rots], axis=1).astype(
-            np.float32)  # combines location, dimensions and rotation into a 2D array
-
+            np.float32)
 
         ############################### Enlarge bounding boxes to extract dynamic points #################
-        percentage_factor = 1.10  # Target increase of 20%
-        max_absolute_increase_m = 0.5  # The maximum total increase for any dimension (e.g., 20cm per side)
+        percentage_factor = 1.10
+        max_absolute_increase_m = 0.5  # The maximum total increase for any dimension (e.g., 25cm per side)
 
         # 1. Calculate the dimensions if extended by the percentage factor
         dims_extended_by_percentage = dims * percentage_factor
@@ -2772,9 +2770,9 @@ def main(trucksc, indice, truckscenesyaml, args, config):
 
         gt_bbox_3d_points_in_boxes_cpu_enlarged = gt_bbox_3d_unmodified.copy()
 
-        gt_bbox_3d_points_in_boxes_cpu_enlarged[:, 6] += np.pi / 2.  # adjust yaw angles by 90 degrees
-        gt_bbox_3d_points_in_boxes_cpu_enlarged[:, 2] -= dims[:, 2] / 2.
-        # gt_bbox_3d_points_in_boxes_cpu_enlarged[:, 2] = gt_bbox_3d_points_in_boxes_cpu_enlarged[:, 2] - 0.1  # Move the bbox slightly down in the z direction
+        gt_bbox_3d_points_in_boxes_cpu_enlarged[:, 6] += np.pi / 2.  # adjust yaw angles by 90 degrees for points_in_boxes_cpu()
+        gt_bbox_3d_points_in_boxes_cpu_enlarged[:, 2] -= dims[:, 2] / 2. # needed as points_in_boxes_cpu() expects bottom center of box
+        # gt_bbox_3d_points_in_boxes_cpu_enlarged[:, 2] = gt_bbox_3d_points_in_boxes_cpu_enlarged[:, 2] - 0.1
         gt_bbox_3d_points_in_boxes_cpu_enlarged[:, 3:6] = new_dims
 
         ########################################### Boxes for calculating IoU later ###################################
@@ -2786,29 +2784,22 @@ def main(trucksc, indice, truckscenesyaml, args, config):
 
         dims_filter = dims * 1.15
 
+        # enlarge width of cars and trucks as mirrors often not included in bounding boxes --> avoid artifacts
         width_scale_car = 1.20
-        width_scale_truck = 1.25
+        width_scale_truck = 1.3
         for index, cat in enumerate(original_object_category_names):
             if cat == 'vehicle.car':
                 dims_filter[index, 0] = dims[index, 0] * width_scale_car
             elif cat == 'vehicle.truck':
                 dims_filter[index, 0] = dims[index, 0] * width_scale_truck
 
-
-        gt_bbox_3d_points_in_boxes_cpu_max_enlarged[:, 6] += np.pi / 2.  # adjust yaw angles by 90 degrees
-        gt_bbox_3d_points_in_boxes_cpu_max_enlarged[:, 2] -= dims[:, 2] / 2.
-        # gt_bbox_3d_points_in_boxes_cpu_max_enlarged[:, 2] = gt_bbox_3d_points_in_boxes_cpu_max_enlarged[:, 2] - 0.1  # Move the bbox slightly down in the z direction
+        gt_bbox_3d_points_in_boxes_cpu_max_enlarged[:, 6] += np.pi / 2.  # adjust yaw angles by 90 degrees for points_in_boxes_cpu()
+        gt_bbox_3d_points_in_boxes_cpu_max_enlarged[:, 2] -= dims[:, 2] / 2. # needed as points_in_boxes_cpu() expects bottom center of box
+        # gt_bbox_3d_points_in_boxes_cpu_max_enlarged[:, 2] = gt_bbox_3d_points_in_boxes_cpu_max_enlarged[:, 2] - 0.1
         gt_bbox_3d_points_in_boxes_cpu_max_enlarged[:, 3:6] = dims_filter
 
 
         ############################### Visualize if specified in arguments ###########################################
-        # visualize_pointcloud(sensor_fused_pc.points.T, title=f"Fused sensor PC in ego coordinates - Frame {i}")
-        """visualize_pointcloud_bbox(sensor_fused_pc.points.T,
-                                          boxes=boxes_ego,
-                                          title=f"Fused filtered static sensor PC + BBoxes + Ego BBox - Frame {i}",
-                                          self_vehicle_range=self_range,
-                                          vis_self_vehicle=True)"""
-
         if args.vis_raw_pc:
             visualize_pointcloud_bbox(sensor_fused_pc.points.T,
                                       boxes=boxes_ego,
@@ -2820,8 +2811,8 @@ def main(trucksc, indice, truckscenesyaml, args, config):
         ############################## Filter raw pc #################################################################
         if args.filter_raw_pc and args.filter_mode != 'none':
             # 1) prepare
-            raw_pts = sensor_fused_pc.points.T # (N, 3+…)
-            raw_sids = sensor_ids_points.copy()  # (N,)
+            raw_pts = sensor_fused_pc.points.T
+            raw_sids = sensor_ids_points.copy()
             pcd_raw = o3d.geometry.PointCloud()
             pcd_raw.points = o3d.utility.Vector3dVector(raw_pts[:, :3])
 
@@ -2832,11 +2823,11 @@ def main(trucksc, indice, truckscenesyaml, args, config):
             raw_pts = np.asarray(filtered_raw_pcd.points)
             raw_sids = raw_sids[kept_raw_idx]
 
-            # 4) if you had extra features beyond XYZ, re‐append them:
+            # 4) re‐append extra features:
             if sensor_fused_pc.points.shape[0] > 3:
                 raw_pts = np.hstack([raw_pts, sensor_fused_pc.points.T[kept_raw_idx, 3:]])
 
-            # Now overwrite your fused_pc & sensor_ids:
+            # Now overwrite fused_pc & sensor_ids:
             sensor_fused_pc.points = raw_pts.T
             sensor_fused_pc.timestamps = sensor_fused_pc.timestamps[:, kept_raw_idx]
             sensor_ids_points = raw_sids.copy()
@@ -2846,13 +2837,6 @@ def main(trucksc, indice, truckscenesyaml, args, config):
         ##############################################################################################################
 
         ############################### Visualize if specified in arguments ###########################################
-        # visualize_pointcloud(sensor_fused_pc.points.T, title=f"Fused sensor PC in ego coordinates - Frame {i}")
-        """visualize_pointcloud_bbox(sensor_fused_pc.points.T,
-                                          boxes=boxes_ego,
-                                          title=f"Fused filtered static sensor PC + BBoxes + Ego BBox - Frame {i}",
-                                          self_vehicle_range=self_range,
-                                          vis_self_vehicle=True)"""
-
         if args.vis_raw_pc and args.filter_raw_pc:
             visualize_pointcloud_bbox(sensor_fused_pc.points.T,
                                       boxes=boxes_ego,
@@ -2866,18 +2850,14 @@ def main(trucksc, indice, truckscenesyaml, args, config):
                                                                :]))  # use function to identify which points belong to which bounding box
 
         #################################### Mask for the ego vehicle itself #######################################
-        # Get points from the fused point cloud (transposed for shape [Npoints, 4])
         points_xyz = sensor_fused_pc.points.T[:, :3]
 
         # Create a mask for points outside the ego vehicle bounding box
-        # Mask calculation: filters out points that are too close to the vehicle in x, y or z directions
-
         inside_x = torch.from_numpy(points_xyz[:, 0] >= x_min_self) & torch.from_numpy(points_xyz[:, 0] <= x_max_self)
         inside_y = torch.from_numpy(points_xyz[:, 1] >= y_min_self) & torch.from_numpy(points_xyz[:, 1] <= y_max_self)
         inside_z = torch.from_numpy(points_xyz[:, 2] >= z_min_self) & torch.from_numpy(points_xyz[:, 2] <= z_max_self)
 
         inside_ego_mask = inside_x & inside_y & inside_z
-
 
         ############################ Prepare point clouds for kiss-icp #################################
         VELOCITY_THRESHOLD_M_S = 0.2
@@ -2896,13 +2876,10 @@ def main(trucksc, indice, truckscenesyaml, args, config):
         if np.any(is_box_moving_mask):
             points_in_moving_boxes_mask_torch = points_in_boxes[0][:, is_box_moving_mask].any(dim=1)
 
-        # Combine ego (`inside_ego_mask`) and moving points into a single removal mask
         points_to_remove_mask_torch = inside_ego_mask | points_in_moving_boxes_mask_torch
 
-        # This is the mask to select the initial set of points for ICP
         initial_keep_for_icp_mask_np = ~points_to_remove_mask_torch.numpy()
 
-        # Create the intermediate point cloud (with ego/dynamic objects removed)
         pc_for_icp = sensor_fused_pc.points.T[initial_keep_for_icp_mask_np]
 
         if args.filter_lidar_intensity and weather in ['snow', 'rain', 'fog']:
@@ -2928,12 +2905,9 @@ def main(trucksc, indice, truckscenesyaml, args, config):
                 # Start with a final mask that keeps all points in `pc_for_icp`.
                 final_keep_mask = np.ones(pc_for_icp.shape[0], dtype=bool)
 
-                # Update the mask: For the locations of the background points,
-                # set their keep status according to the intensity filter result.
                 # Points in boxes remain True (kept) because they are not part of `background_points_mask`.
                 final_keep_mask[background_points_mask] = intensity_keep_mask_for_bg
 
-                # Apply the final, combined mask.
                 num_before = pc_for_icp.shape[0]
                 pc_for_icp = pc_for_icp[final_keep_mask]
                 num_after = pc_for_icp.shape[0]
@@ -3040,8 +3014,6 @@ def main(trucksc, indice, truckscenesyaml, args, config):
         print(
             f"Number of semantic static points extracted: {pc_with_semantic_ego_unfiltered.shape} with sensor_ids {pc_with_semantic_ego_unfiltered_sensors.shape}")
 
-
-
         ############################### Visualize if specified in arguments ###########################################
         if args.vis_static_pc:
             visualize_pointcloud_bbox(pc_with_semantic_ego_unfiltered,
@@ -3052,7 +3024,6 @@ def main(trucksc, indice, truckscenesyaml, args, config):
         ############################################################################################################
 
         pc_ego = pc_ego_unfiltered.copy()
-        # pc_with_semantic_ego = pc_with_semantic_ego_unfiltered.copy()
 
         ########################################## Lidar intensity filtering #######################################
         if args.filter_lidar_intensity:
@@ -3089,16 +3060,10 @@ def main(trucksc, indice, truckscenesyaml, args, config):
             )
             pc_ego = np.asarray(filtered_pcd_static.points)
             pc_ego_unfiltered_sensors = pc_ego_unfiltered_sensors[kept_indices]
-            # pc_with_semantic_ego = pc_with_semantic_ego[kept_indices]  # ✅ Only filter here
-            # pc_with_semantic_ego_unfiltered_sensors = pc_with_semantic_ego_unfiltered_sensors[kept_indices]
 
         assert pc_ego.shape[0] == pc_ego_unfiltered_sensors.shape[0], (
             f"static points ({pc_ego.shape[0]}) != sensor_ids ({pc_ego_unfiltered_sensors.shape[0]})"
         )
-        """assert pc_with_semantic_ego.shape[0] == pc_with_semantic_ego_unfiltered_sensors.shape[0], (
-            f"semantic points ({pc_with_semantic_ego.shape[0]}) != semantic_sensor_ids "
-            f"({pc_with_semantic_ego_unfiltered_sensors.shape[0]})"
-        )"""
 
         ############################ Visualization #############################################################
         if args.vis_static_pc and args.filter_static_pc:
@@ -3127,27 +3092,18 @@ def main(trucksc, indice, truckscenesyaml, args, config):
             print(f"Frame {i}: Calculated transform to reference frame.")
 
         points_in_ref_frame = transform_points(pc_ego, ego_ref_from_ego_i)
-        #semantic_points_in_ref_frame = transform_points(pc_with_semantic_ego, ego_ref_from_ego_i)
         print(f"Frame {i}: Transformed static points to ref ego. Shape: {points_in_ref_frame.shape}")
-        #print(f"Frame {i}: Transformed semantic static points to ref ego. Shape: {semantic_points_in_ref_frame.shape}")
 
         points_in_global_frame = transform_points(pc_ego, global_from_ego_i)
-        #semantic_points_in_global_frame = transform_points(pc_with_semantic_ego, global_from_ego_i)
         print(f"Frame {i}: Transformed static points to global. Shape: {points_in_global_frame.shape}")
-        #print(
-         #   f"Frame {i}: Transformed semantic static points to global. Shape: {semantic_points_in_global_frame.shape}")
 
         if args.vis_static_pc_global:
             visualize_pointcloud(points_in_ref_frame, title=f"Fused sensor PC in world coordinates - Frame {i}")
 
         pc_ego_i_save = pc_ego.copy()
         print(f"Frame {i}: Static points in ego frame shape: {pc_ego_i_save.shape}")
-        # pc_with_semantic_ego_i_save = pc_with_semantic_ego.copy()  # Filtered semantic points in current ego frame (Features+1, N)
-        # print(f"Frame {i}: Static semantic points in ego frame shape: {pc_with_semantic_ego_i_save.shape}")
-        pc_ego_ref_save = points_in_ref_frame.copy()  # Filtered points transformed to reference ego frame (Features, N)
-        # pc_with_semantic_ego_ref_save = semantic_points_in_ref_frame.copy()  # Filtered semantic points transformed to reference ego frame (Features+1, N)
-        pc_global_save = points_in_global_frame.copy()  # Filtered points transformed to global frame (Features, N)
-        # pc_with_semantic_global_save = semantic_points_in_global_frame.copy()  # Filtered semantic points transformed to global frame (Features+1, N)
+        pc_ego_ref_save = points_in_ref_frame.copy()
+        pc_global_save = points_in_global_frame.copy()
 
         ################## Save all information into a dict  ########################
         ref_sd = trucksc.get('sample_data', sample['sample_data_token'])
@@ -3164,29 +3120,17 @@ def main(trucksc, indice, truckscenesyaml, args, config):
             "gt_bbox_3d_overlap_enlarged": gt_bbox_3d_overlap_enlarged,
             "gt_bbox_3d_unmodified": gt_bbox_3d_unmodified,
             "object_tokens": object_tokens,
-            "object_points_list": object_points_list,  # Raw object points in current ego frame
+            "object_points_list": object_points_list,
             "object_points_list_sensor_ids": objects_points_list_sensor_ids,
             "raw_lidar_ego": sensor_fused_pc.points.T,
             "raw_lidar_ego_sensor_ids": sensor_ids_points.T,
             "mapmos_per_point_labels": current_frame_mapmos_labels,
-            "lidar_pc_ego_i": pc_ego_i_save,  # Filtered static points in CURRENT ego frame (i)
+            "lidar_pc_ego_i": pc_ego_i_save,
             "lidar_pc_ego_sensor_ids": pc_ego_unfiltered_sensors,
-            # "lidar_pc_with_semantic_ego_i": pc_with_semantic_ego_i_save,
-            # "lidar_pc_with_semantic_ego_sensor_ids": pc_with_semantic_ego_unfiltered_sensors,
-            # Filtered semantic static points in CURRENT ego frame (i)
-            "lidar_pc_ego_ref": pc_ego_ref_save,  # Filtered static points transformed to REFERENCE ego frame
-            # "lidar_pc_with_semantic_ego_ref": pc_with_semantic_ego_ref_save,
-            # Filtered semantic static points transformed to REFERENCE ego frame
-            "lidar_pc_global": pc_global_save,  # Filtered static points transformed to GLOBAL frame
-            # "lidar_pc_with_semantic_global": pc_with_semantic_global_save,
-            # Filtered semantic static points transformed to GLOBAL frame
+            "lidar_pc_ego_ref": pc_ego_ref_save,
+            "lidar_pc_global": pc_global_save,
             "ego_pose": ego_pose_i,  # Current frame's ego pose dictionary
-            # "lidar_calibrated_sensor": ref_calibrated_sensor # Uncomment if needed
-            # Add other necessary fields like ego_ref_from_ego_i if needed later for ICP refinement logic
             "ego_ref_from_ego_i": ego_ref_from_ego_i,
-            # Store originals if your ICP logic needs them (Optional based on full implementation)
-            # "original_pc_ego": pc_ego_unfiltered.copy(),
-            # "original_pc_with_semantic_ego": pc_with_semantic_ego_unfiltered.copy(),
             "lidar_pc_for_icp_ego_i": pc_for_icp
         }
 
@@ -3422,7 +3366,6 @@ def main(trucksc, indice, truckscenesyaml, args, config):
     o3d.visualization.draw_geometries([pcd_static_vis],
                                       window_name=f"Final Static Points (Frame 0)")"""
 
-
     ###############################################################################################
     ################# Refinement using KISS-ICP ###################################################
     poses_kiss_icp = None
@@ -3432,10 +3375,10 @@ def main(trucksc, indice, truckscenesyaml, args, config):
         # --- 1. Prepare Dataset and Pipeline ---
         in_memory_dataset = None
         pipeline = None
-        estimated_poses_kiss = None  # Will hold the results from pipeline.poses
+        estimated_poses_kiss = None
         log_dir_kiss = osp.join(save_path, scene_name, "kiss_icp_logs")
 
-        initial_relative_motions = []  # This will be a list of 4x4 numpy arrays
+        initial_relative_motions = []
 
         if args.initial_guess_mode == 'ego_pose':
             print("Using 'ego_pose' for initial guesses.")
@@ -3465,7 +3408,6 @@ def main(trucksc, indice, truckscenesyaml, args, config):
 
                     try:
                         P_dataset_prev_global_inv = np.linalg.inv(P_dataset_prev_global)
-                        # This is T_curr_from_prev_dataset = (P_prev_dataset)^-1 * P_curr_dataset
                         relative_motion_from_dataset = P_dataset_prev_global_inv @ P_dataset_curr_global
                         initial_relative_motions.append(relative_motion_from_dataset)
                     except np.linalg.LinAlgError:
@@ -3512,7 +3454,6 @@ def main(trucksc, indice, truckscenesyaml, args, config):
                     print(f"  Generated {len(initial_relative_motions)} initial guesses from 'IMU'.")
         else:
             print("Initial guess mode is 'none' or invalid. KISS-ICP will use its default constant velocity model.")
-            # initial_relative_motions remains empty, so OdometryPipeline will pass None.
             pass
 
         try:
@@ -3530,23 +3471,22 @@ def main(trucksc, indice, truckscenesyaml, args, config):
 
         except Exception as e:
             print(f"Error creating InMemoryDataset: {e}. Skipping refinement.")
-            args.icp_refinement = False  # Disable refinement
+            args.icp_refinement = False
 
         if args.icp_refinement and in_memory_dataset:
             try:
-                kiss_config_path = Path('kiss_config.yaml')  # Ensure this file exists
+                kiss_config_path = Path('kiss_config.yaml')
                 pipeline = OdometryPipeline(dataset=in_memory_dataset, config=kiss_config_path, initial_guesses_relative=initial_relative_motions)
                 print("KISS-ICP pipeline initialized.")
             except Exception as e:
                 print(f"Error initializing KISS-ICP: {e}. Skipping refinement.")
-                args.icp_refinement = False  # Disable refinement if init fails
+                args.icp_refinement = False
 
         # --- 2. Run KISS-ICP Pipeline ---
-        if args.icp_refinement and pipeline is not None:  # Check again in case init failed
+        if args.icp_refinement and pipeline is not None:
             kiss_start_time = time.time()
             print("Running KISS-ICP pipeline...")
             try:
-                # --- THIS IS THE CORRECT WAY TO RUN THE PIPELINE ---
                 results = pipeline.run()
                 # ----------------------------------------------------
                 kiss_end_time = time.time()
@@ -3554,19 +3494,18 @@ def main(trucksc, indice, truckscenesyaml, args, config):
                 print("Pipeline Results:", results)
 
                 # --- Get the calculated poses AFTER run() completes ---
-                estimated_poses_kiss = pipeline.poses  # This is the NumPy array (NumScans, 4, 4)
+                estimated_poses_kiss = pipeline.poses
                 poses_kiss_icp = pipeline.poses
 
-                # Basic check on returned poses
                 if not isinstance(estimated_poses_kiss, np.ndarray) or \
                         estimated_poses_kiss.shape != (len(raw_pc_list), 4, 4):
                     print(f"Error: Unexpected pose results shape {estimated_poses_kiss.shape}. "
                           f"Expected ({len(raw_pc_list)}, 4, 4). Skipping refinement application.")
-                    args.icp_refinement = False  # Disable further steps
+                    args.icp_refinement = False
 
             except Exception as e:
                 print(f"Error during KISS-ICP pipeline run: {e}. Skipping refinement application.")
-                args.icp_refinement = False  # Disable further steps if run fails
+                args.icp_refinement = False
                 import traceback
                 traceback.print_exc()
 
@@ -3574,7 +3513,6 @@ def main(trucksc, indice, truckscenesyaml, args, config):
         if args.icp_refinement and estimated_poses_kiss is not None:
             print("Applying refined poses from KISS-ICP...")
             refined_lidar_pc_list = []
-            # refined_lidar_pc_with_semantic_list = []
 
             for idx, points_ego in enumerate(unrefined_pc_ego_list): #(static_points_mapmos): # (unrefined_pc_ego_list):
                 pose = estimated_poses_kiss[idx]
@@ -3582,13 +3520,11 @@ def main(trucksc, indice, truckscenesyaml, args, config):
 
                 print(f"Points ego shape: {points_ego.shape}")
 
-                # points_xyz = points_ego.T[:, :3]
                 points_xyz = points_ego[:, :3]
                 points_homo = np.hstack((points_xyz, np.ones((points_xyz.shape[0], 1))))
                 points_transformed = (pose @ points_homo.T)[:3, :].T
 
                 if points_ego.shape[1] > 3:
-                    # other_features = points_ego.T[:, 3:]
                     other_features = points_ego[:, 3:]
                     points_transformed = np.hstack((points_transformed, other_features))
 
@@ -3610,11 +3546,11 @@ def main(trucksc, indice, truckscenesyaml, args, config):
                 refined_lidar_pc_with_semantic_list.append(points_transformed)"""
 
         # --- 4. Compare KISS-ICP Poses with Ground Truth ---
-        if 'gt_relative_poses_arr' in locals() and gt_relative_poses_arr.shape[0] > 0:  # Check if GT poses were loaded
+        if 'gt_relative_poses_arr' in locals() and gt_relative_poses_arr.shape[0] > 0:
             if poses_kiss_icp.shape[0] == gt_relative_poses_arr.shape[0]:
                 print("\n--- Comparing KISS-ICP Poses with Ground Truth Poses ---")
                 trans_errors = []
-                rot_errors_rad = []  # Store rotational errors in radians
+                rot_errors_rad = []
                 trans_errors_x = []
                 trans_errors_y = []
                 trans_errors_z = []
@@ -3644,13 +3580,10 @@ def main(trucksc, indice, truckscenesyaml, args, config):
                     R_gt = pose_gt_k[:3, :3]
 
                     # Relative rotation: R_error = inv(R_kiss) @ R_gt
-                    # or R_error = R_gt @ R_kiss.T (if R_kiss is orthogonal, its transpose is its inverse)
                     R_error = R_kiss.T @ R_gt
 
                     # Angle from rotation matrix trace
-                    # angle = arccos((trace(R_error) - 1) / 2)
                     trace_val = np.trace(R_error)
-                    # Clip to avoid domain errors with arccos due to numerical inaccuracies for values slightly outside [-1, 1]
                     clipped_arg = np.clip((trace_val - 1.0) / 2.0, -1.0, 1.0)
                     rot_error_rad = np.arccos(clipped_arg)
                     rot_errors_rad.append(rot_error_rad)
@@ -3665,9 +3598,9 @@ def main(trucksc, indice, truckscenesyaml, args, config):
                 mae_trans_error_y = np.mean(np.abs(trans_errors_y))
                 mae_trans_error_z = np.mean(np.abs(trans_errors_z))
 
-                mean_trans_error_x = np.mean(trans_errors_x)  # To see bias
-                mean_trans_error_y = np.mean(trans_errors_y)  # To see bias
-                mean_trans_error_z = np.mean(trans_errors_z)  # To see bias
+                mean_trans_error_x = np.mean(trans_errors_x)
+                mean_trans_error_y = np.mean(trans_errors_y)
+                mean_trans_error_z = np.mean(trans_errors_z)
 
                 print(f"Sequence: {scene_name}")
                 print(f"  Average Translational Error : {avg_trans_error:.4f} m")
@@ -3678,7 +3611,6 @@ def main(trucksc, indice, truckscenesyaml, args, config):
                 print(f"  MAE Y: {mae_trans_error_y:.4f} m (Mean Y Bias: {mean_trans_error_y:+.4f} m)")
                 print(f"  MAE Z: {mae_trans_error_z:.4f} m (Mean Z Bias: {mean_trans_error_z:+.4f} m)")
 
-                # Plotting (updated to 2x2 layout)
                 fig, axs = plt.subplots(2, 2, figsize=(17, 10))  # Adjusted figsize for 2x2
                 fig.suptitle(f'Scene {scene_name}: KISS-ICP vs GT Relative Pose Errors', fontsize=16)
 
@@ -3736,9 +3668,6 @@ def main(trucksc, indice, truckscenesyaml, args, config):
         elif not ('gt_relative_poses_arr' in locals() and gt_relative_poses_arr.shape[0] > 0):
             print("GT relative poses not available for comparison.")
 
-
-
-                    # Determine the source lists for aggregation based on ICP refinement
     if not args.icp_refinement:
         print("ICP refinement is OFF. Using unrefined points (in reference ego frame) for aggregation.")
         source_pc_list_all_frames = unrefined_pc_ego_ref_list
@@ -3746,7 +3675,7 @@ def main(trucksc, indice, truckscenesyaml, args, config):
     else:
         print("ICP refinement is ON. Using KISS-ICP refined points for aggregation.")
         source_pc_list_all_frames = refined_lidar_pc_list
-        source_pc_sids_list_all_frames = unrefined_pc_ego_list_sensor_ids  # SIDs from ego_i list
+        source_pc_sids_list_all_frames = unrefined_pc_ego_list_sensor_ids
 
     #################################### Filtering based on if only keyframes should be used ###########################
     print(f"Static map aggregation: --static_map_keyframes_only is {args.static_map_keyframes_only}")
@@ -3756,14 +3685,12 @@ def main(trucksc, indice, truckscenesyaml, args, config):
 
     for idx, frame_info in enumerate(dict_list):
         is_key = frame_info['is_key_frame']
-        # Decide whether to include this frame's points in the static map
         include_in_static_map = True
         if args.static_map_keyframes_only and not is_key:
             include_in_static_map = False
 
         if include_in_static_map:
             print(f"  Including frame {idx} (Keyframe: {is_key}) in static map aggregation.")
-            # Add static points
             if idx < len(source_pc_list_all_frames) and source_pc_list_all_frames[idx].shape[0] > 0:
                 lidar_pc_list_for_concat.append(source_pc_list_all_frames[idx])
                 if idx < len(source_pc_sids_list_all_frames) and source_pc_sids_list_all_frames[idx].shape[0] > 0:
@@ -4023,7 +3950,6 @@ def main(trucksc, indice, truckscenesyaml, args, config):
                             contextual_canonical_sids_segments.append(obj_sids_in_candidate)
 
             num_aggregated_frames = len(contextual_canonical_segments)
-            # Use the class_name in the log
             print(f"      -> For object '{class_name} ({short_token})', found {num_aggregated_frames} similar context frame(s).")
 
             # --- 3. Aggregate the collected points and place them in the scene ---
@@ -4035,8 +3961,6 @@ def main(trucksc, indice, truckscenesyaml, args, config):
                 aggregated_canonical_sids = np.concatenate(contextual_canonical_sids_segments, axis=0)
                 print(f"      -> Aggregated {aggregated_canonical_points.shape[0]} points for this context.")
             else:
-                # FALLBACK: If no similar contexts are found, use only the points from the current keyframe
-                # This prevents an object from disappearing if its context is unique.
                 print(f"      -> No similar contexts found. Using points from keyframe {i} only.")
                 obj_points_in_keyframe = frame_dict['object_points_list'][keyframe_obj_idx]
                 if obj_points_in_keyframe is not None and obj_points_in_keyframe.shape[0] > 0:
@@ -4073,25 +3997,13 @@ def main(trucksc, indice, truckscenesyaml, args, config):
                     # Get the box indices for each point
                     box_indices_tensor = points_in_boxes_cpu(points_tensor, box_tensor)
 
-                    # --- FIX 1: Correctly create the boolean mask ---
-                    # A point is inside if its box index is 0 or greater.
                     points_in_box_mask = (box_indices_tensor[0, :, 0] >= 0)
 
-                    # --- FIX 2: Make indexing robust by converting the mask to a NumPy array ---
                     points_in_box_mask_numpy = points_in_box_mask.cpu().numpy()
 
                     # Apply the corrected and safe NumPy mask
                     points_in_scene_xyz = points_in_scene_xyz[points_in_box_mask_numpy]
                     sids_for_points = sids_for_points[points_in_box_mask_numpy]
-
-                    """points_in_box_mask = points_in_boxes_cpu(
-                        torch.from_numpy(points_in_scene_xyz[np.newaxis, :, :]),
-                        torch.from_numpy(bbox_for_filtering[np.newaxis, :, :])
-                    )[0, :, 0].bool()
-
-                    # Apply the mask to the points and their corresponding sensor IDs
-                    points_in_scene_xyz = points_in_scene_xyz[points_in_box_mask]
-                    sids_for_points = sids_for_points[points_in_box_mask]"""
 
                     filtered_count = points_in_scene_xyz.shape[0]
                     if original_count > filtered_count:
@@ -4118,15 +4030,6 @@ def main(trucksc, indice, truckscenesyaml, args, config):
                                       title=f"Fused static PC before combining with dynamic points + BBoxes + Ego BBox - Frame {i}",
                                       self_vehicle_range=self_range,
                                       vis_self_vehicle=True)
-
-        """temp_points_filename = f'frame_{i}_temp_points.npy'
-        sem_temp_points_filename = f'frame_{i}_sem_temp_points.npy'
-        dirs = os.path.join(save_path, scene_name, frame_dict['sample_token'])  #### Save in folder with scene name
-        if not os.path.exists(dirs):  # create directory if does not exist
-            os.makedirs(dirs)
-        output_filepath_temp = os.path.join(dirs, temp_points_filename)
-        output_filepath_sem_temp = os.path.join(dirs, sem_temp_points_filename)"""
-
 
         ######################################## Cleanup of overlapping box labels #######################################
         # --- Step 1: Aggregate all dynamic points and their initial labels ---
@@ -4180,7 +4083,6 @@ def main(trucksc, indice, truckscenesyaml, args, config):
             # Prepare the boxes with labels for the function
             boxes_with_labels = np.concatenate([boxes_for_lshape_logic, box_categories.reshape(-1, 1)], axis=1)
 
-            # The labels for the dynamic points before refinement
             labels_before_refinement = dyn_points_semantic[:, 3:4]
 
             # --- Step 3: Call the refinement function on the dynamic subset ---
@@ -4243,11 +4145,6 @@ def main(trucksc, indice, truckscenesyaml, args, config):
         print(f"Scene points after applying range filtering: {scene_points.shape}")
 
         ################################## Visualize #####################################################
-        """visualize_pointcloud_bbox(scene_points,
-                                  boxes=boxes,
-                                  title=f"Fused dynamic and static PC + BBoxes + Ego BBox - Frame {i}",
-                                  self_vehicle_range=self_range,
-                                  vis_self_vehicle=True)"""
         if args.vis_combined_static_dynamic_pc:
             visualize_pointcloud_bbox(scene_semantic_points,
                                       boxes=boxes,
@@ -4262,11 +4159,11 @@ def main(trucksc, indice, truckscenesyaml, args, config):
                                       vis_self_vehicle=True)
         ################################################################################################
 
-        ################## get semantics of sparse points  ##############
+        ################## Range filtering for semantic points  ##############
         print(f"Scene semantic points before applying range filtering: {scene_semantic_points.shape}")
         mask = in_range_mask(scene_semantic_points, pc_range)
 
-        scene_semantic_points = scene_semantic_points[mask]  # Filter points within a spatial range
+        scene_semantic_points = scene_semantic_points[mask]
         scene_semantic_points_sids = scene_semantic_points_sids[mask]
         print(f"Scene semantic points after applying range filtering: {scene_semantic_points.shape}")
 
@@ -4284,12 +4181,10 @@ def main(trucksc, indice, truckscenesyaml, args, config):
             scene_semantic_points_sids = scene_semantic_points_sids[kept_indices]
         ############################################################################################
 
-        # ensure each combined scene point has a sensor id
         assert scene_points.shape[0] == scene_points_sids.shape[0], (
             f"scene_points count ({scene_points.shape[0]}) != scene_points_sids count ({scene_points_sids.shape[0]})"
         )
 
-        # ensure each semantic scene point has a sensor id
         assert scene_semantic_points.shape[0] == scene_semantic_points_sids.shape[0], (
             f"scene_semantic_points count ({scene_semantic_points.shape[0]}) != "
             f"scene_semantic_points_sids count ({scene_semantic_points_sids.shape[0]})"
@@ -4429,21 +4324,18 @@ def main(trucksc, indice, truckscenesyaml, args, config):
                     else:
                         # If no voxels are occupied (e.g., the entire grid is FREE_LEARNING_INDEX)
                         dense_voxels_with_semantic_voxelcoords_save = np.zeros((0, 4), dtype=int)
-
+        ######################## No meshing ############################################
         else:
             print("--- Starting Voxelization without Meshing ---")
             if scene_semantic_points.shape[0] == 0:
                 print("No semantic points available. Occupancy grid will be empty/free.")
-                # occupancy_grid already initialized to FREE, dense_voxels_with_semantic_voxelcoords is empty
             else:
-
+                ############################### Calculating visibility masks ###########################
                 print("Creating Lidar visibility masks")
 
-                # Directly use scene_semantic_points (which are XYZL)
-                # Convert their world XYZ to voxel coordinates, keep their labels
                 points_to_voxelize = scene_semantic_points.copy()
 
-                labels = points_to_voxelize[:, 3].astype(int)  # Assuming label is 4th col
+                labels = points_to_voxelize[:, 3].astype(int)
 
                 voxel_indices_float = np.zeros_like(points_to_voxelize[:, :3])
                 voxel_indices_float[:, 0] = (points_to_voxelize[:, 0] - pc_range[0]) / voxel_size
@@ -4466,8 +4358,6 @@ def main(trucksc, indice, truckscenesyaml, args, config):
 
                 # Initialize 3D occupancy grid with the "Unknown" or "Background" label (e.g. 16)
                 occupancy_grid = np.full(occ_size, FREE_LEARNING_INDEX, dtype=np.uint8)
-                # Populate the final occupancy_grid
-                # If multiple original semantic points fall into the same voxel, the last one's label will apply.
                 if dense_voxels_with_semantic_voxelcoords.shape[0] > 0:
                     occupancy_grid[
                         dense_voxels_with_semantic_voxelcoords[:, 0],
@@ -4475,31 +4365,28 @@ def main(trucksc, indice, truckscenesyaml, args, config):
                         dense_voxels_with_semantic_voxelcoords[:, 2]
                     ] = dense_voxels_with_semantic_voxelcoords[:, 3]
 
-                # pick the proper origin for each LiDAR hit by indexing with your per‐point sensor‐ID
-                #    scene_points_sids is (N,) telling which sensor produced each point
-                points_origin = sensor_origins[scene_semantic_points_sids]  # (N,3)
+                points_origin = sensor_origins[scene_semantic_points_sids]
                 print(f"Points origin shape: {points_origin.shape}")
                 points_label = scene_semantic_points[:, 3].astype(int)
                 print(f"Points label shape: {points_label.shape}")
                 points = scene_semantic_points[:, :3]
                 print(f"Points shape: {points.shape}")
 
+                ############################### Lidar visibility mask calculation gpu ###############################
                 print("Creating Lidar visibility masks using GPU...")
-                # --- Time the GPU execution ---
                 print("\nTiming GPU Lidar visibility calculation...")
                 start_time_gpu = time.perf_counter()
 
-                # Call the GPU host function
                 voxel_state_gpu, voxel_label_gpu = calculate_lidar_visibility_gpu_host(
-                    points_cpu=points,  # Your (N,3) hits
-                    points_origin_cpu=points_origin,  # Your (N,3) original sensor origins
-                    points_label_cpu=points_label,  # Your (N,) semantic labels (ensure int32)
-                    pc_range_cpu_list=pc_range,  # Your [xmin,ymin,zmin,xmax,ymax,zmax] list
-                    voxel_size_cpu_scalar=voxel_size,  # Your scalar voxel_size from config
-                    spatial_shape_cpu_list=occ_size,  # Your [Dx,Dy,Dz] list from config
-                    occupancy_grid_cpu=occupancy_grid,  # Your pre-computed (Dx,Dy,Dz) aggregated occupancy (uint8)
-                    FREE_LEARNING_INDEX_cpu=FREE_LEARNING_INDEX,  # Your semantic index for free space
-                    FREE_LABEL_placeholder_cpu=-1,  # The internal placeholder for initializing labels on GPU
+                    points_cpu=points,  # (N,3) hits
+                    points_origin_cpu=points_origin,  # (N,3) original sensor origins
+                    points_label_cpu=points_label,  # (N,) semantic labels (ensure int32)
+                    pc_range_cpu_list=pc_range,  # [xmin,ymin,zmin,xmax,ymax,zmax] list
+                    voxel_size_cpu_scalar=voxel_size,  # scalar voxel_size from config
+                    spatial_shape_cpu_list=occ_size,  # [Dx,Dy,Dz] list from config
+                    occupancy_grid_cpu=occupancy_grid,  # pre-computed (Dx,Dy,Dz) aggregated occupancy (uint8)
+                    FREE_LEARNING_INDEX_cpu=FREE_LEARNING_INDEX,  # semantic index for free space
+                    FREE_LABEL_placeholder_cpu=-1,  # internal placeholder for initializing labels on GPU
                     points_sensor_indices_cpu=scene_semantic_points_sids.astype(np.int32),
                     sensor_max_ranges_cpu=sensor_max_ranges_arr
                 )
@@ -4511,6 +4398,7 @@ def main(trucksc, indice, truckscenesyaml, args, config):
                 print(f"GPU Voxel label shape: {voxel_label_gpu.shape}")
                 print("Finished Lidar visibility masks (GPU).")
 
+                ######################## Visualization of lidar visibility mask #############################
                 if args.vis_lidar_visibility:
                     voxel_size_for_viz = np.array([voxel_size] * 3)
                     visualize_occupancy_o3d(
@@ -4518,13 +4406,15 @@ def main(trucksc, indice, truckscenesyaml, args, config):
                         voxel_label=voxel_label_gpu,
                         pc_range=pc_range,
                         voxel_size=voxel_size_for_viz,
-                        class_color_map=CLASS_COLOR_MAP,  # Make sure this is globally defined
-                        default_color=DEFAULT_COLOR,  # Make sure this is globally defined
+                        class_color_map=CLASS_COLOR_MAP,
+                        default_color=DEFAULT_COLOR,
                         show_semantics=True,
                         show_free=True,
                         show_unobserved=False
                     )
+                #############################################################################################
 
+                ########################## Lidar visibility mask cpu #######################################
                 run_cpu_comparison_lidar = False
                 if run_cpu_comparison_lidar:
                     if isinstance(voxel_size, (int, float)):
@@ -4553,8 +4443,9 @@ def main(trucksc, indice, truckscenesyaml, args, config):
                     print(voxel_state.shape)
                     print(voxel_label.shape)
 
-                    print("Finished Lidar visibility masks")
+                    print("Finished Lidar visibility masks cpu")
 
+                    ######################## Visualization of lidar visibility mask #############################
                     if args.vis_lidar_visibility:
                         print("Visualizing with Semantics and Free")
                         visualize_occupancy_o3d(
@@ -4568,6 +4459,9 @@ def main(trucksc, indice, truckscenesyaml, args, config):
                             show_free=True,
                             show_unobserved=False
                         )
+                    ###########################################################################################
+
+                ############################# Prepare semantics for saving ###################################
 
                 occupied_mask = occupancy_grid != FREE_LEARNING_INDEX
                 total_occupied_voxels = np.sum(occupied_mask)
@@ -4583,15 +4477,13 @@ def main(trucksc, indice, truckscenesyaml, args, config):
                     # If no voxels are occupied (e.g., the entire grid is FREE_LEARNING_INDEX)
                     dense_voxels_with_semantic_voxelcoords_save = np.zeros((0, 4), dtype=int)
 
-                # --- Saving Logic (Using GPU results by default) ---
                 # final_voxel_state_to_save will be the grid with 0 (UNOBS), 1 (FREE), 2 (OCC)
                 final_voxel_state_to_save = voxel_state_gpu
                 # final_voxel_label_to_save will be the grid with semantic labels for OCC,
                 # and FREE_LEARNING_INDEX for FREE and UNOBS. This is the 'semantics' array for Occ3D.
                 final_voxel_label_to_save = voxel_label_gpu
 
-                # --- Calculate Camera Visibility Mask ---
-
+                ####################################### Calculate camera visibility mask GPU ######################
                 print(f"Calculating camera visibility for cameras (GPU): {cameras}")
                 start_time_cam_vis_gpu = time.perf_counter()
 
@@ -4616,6 +4508,7 @@ def main(trucksc, indice, truckscenesyaml, args, config):
                 mask_camera_binary[mask_camera == STATE_OCCUPIED] = 1
                 mask_camera_binary[mask_camera == STATE_FREE] = 1
 
+                ######################### Visualization of camera visibility mask #################################
                 if args.vis_camera_visibility:
                     print("Visualizing GPU Camera Visibility Mask Results...")
 
@@ -4635,12 +4528,13 @@ def main(trucksc, indice, truckscenesyaml, args, config):
                         show_free=True,  # Not showing LiDAR-free for this specific mask viz
                         show_unobserved=False  # Shows what's NOT camera visible as unobserved
                     )
+                ##################################################################################################
 
+                ######################## Calculate camera visibility mask CPU #####################################
                 run_cpu_comparison_camera = False
                 if run_cpu_comparison_camera:
                     print(f"Calculating camera visibility for cameras (CPU): {cameras}")
 
-                    # Ensure voxel_size and occ_size are passed as numpy arrays if the function expects them
                     voxel_size_arr = np.array([voxel_size] * 3) if isinstance(voxel_size, (int, float)) else np.array(
                         voxel_size)
                     occ_size_arr = np.array(occ_size)
@@ -4665,8 +4559,8 @@ def main(trucksc, indice, truckscenesyaml, args, config):
                     mask_camera_binary[mask_camera == STATE_OCCUPIED] = 1
                     mask_camera_binary[mask_camera == STATE_FREE] = 1
 
+                    ######################### Visualization of camera visibility mask #################################
                     if args.vis_camera_visibility:
-
                         print("Visualizing Camera Visibility Mask Results...")
                         temp_voxel_state_for_cam_viz = mask_camera.copy()
 
@@ -4685,7 +4579,8 @@ def main(trucksc, indice, truckscenesyaml, args, config):
                             show_free=True,  # Not showing LiDAR-free for this specific mask viz
                             show_unobserved=False  # Shows what's NOT camera visible as unobserved
                         )
-
+                        ###############################################################################################
+        #################################### Saving the semantics, lidar mask, camera mask ##########################
         print(
             f"Shape of dense_voxels_with_semantic_voxelcoords for saving: {dense_voxels_with_semantic_voxelcoords_save.shape}")
         print(
@@ -4698,47 +4593,26 @@ def main(trucksc, indice, truckscenesyaml, args, config):
         mask_lidar_to_save = (final_voxel_state_to_save != STATE_UNOBSERVED).astype(np.uint8)
         mask_camera_to_save = mask_camera_binary
 
-        ##########################################save like Occ3D #######################################
-        # Save as .npz
+        ########################################## Save like Occ3D #######################################
         dirs = os.path.join(save_path, scene_name, frame_dict['sample_token'])
         if not os.path.exists(dirs):
             os.makedirs(dirs)
 
-        # Save in .npz format, matching Occ3D keys
         output_filepath_npz = os.path.join(dirs, 'labels.npz')
         print(f"Saving semantic occupancy and LiDAR visibility mask to {output_filepath_npz}...")
         np.savez_compressed(
             output_filepath_npz,
-            semantics=final_voxel_label_to_save,  # This is your (Dx,Dy,Dz) semantic grid
-            mask_lidar=mask_lidar_to_save,  # This is your (Dx,Dy,Dz) 0-1 LiDAR visibility mask
-            mask_camera=mask_camera_to_save,
-            # If you also compute camera visibility, you would add:
-            # mask_camera=your_camera_visibility_mask
+            semantics=final_voxel_label_to_save,  # This is (Dx,Dy,Dz) semantic grid
+            mask_lidar=mask_lidar_to_save,  # This is (Dx,Dy,Dz) 0-1 LiDAR visibility mask
+            mask_camera=mask_camera_to_save, # This is (Dx,Dy,Dz) 0-1 camera visibility mask
         )
         print(f"  Saved 'semantics' shape: {final_voxel_label_to_save.shape}")
         print(f"  Saved 'mask_lidar' shape: {mask_lidar_to_save.shape} (0=unobserved, 1=observed)")
         print(
             f"  Saved 'mask_camera' shape: {mask_camera_to_save.shape} (0=unobserved, 1=observed)")
 
-        """##########################################Save as .npy ##########################################
-        # Save the resulting dense voxels with semantics
-        dirs = os.path.join(save_path, scene_name, frame_dict['sample_token'])  #### Save in folder with scene name
-        if not os.path.exists(dirs):  # create directory if does not exist
-            os.makedirs(dirs)
-
-        save_path_base = 'labels'  ### copy file_name to save_path_base
-        suffix_to_remove = '.pcd'  ### define suffix to remove
-        if save_path_base.endswith(suffix_to_remove):
-            save_path_base = save_path_base[:-len(suffix_to_remove)]  ### Slice off suffix
-
-        output_filepath = os.path.join(dirs, save_path_base + '.npy')  ### Generate output filepath
-        # Save the dense semantic voxels as a numpy file with a filename corresponding to the frame
-        print(f"Saving GT to {output_filepath}...")  ####
-        np.save(output_filepath, dense_voxels_with_semantic_voxelcoords_save)  ### saving point cloud
-        print(f"Dense voxels with semantic shape {dense_voxels_with_semantic_voxelcoords_save.shape} saved.")"""
-
         i = i + 1
-        continue  # moves to the next frame for processing
+        continue
 
 
 # Main entry point of the script
@@ -4831,14 +4705,7 @@ if __name__ == '__main__':
     with open(label_mapping, 'r') as stream:
         truckscenesyaml = yaml.safe_load(stream)
 
-    # Process sequences in a loop
     for i in range(args.start, args.end):
         print('processing sequence:', i)
-        # call the main function
-        # Inputs: nusc: initialized truckscenes dataset object
-        # indice: current scene index
-        # truckscenesyaml: loaded label mapping
-        # args: parsed command-line arguments
-        # config: configuration settings
         main(truckscenes, indice=i,
              truckscenesyaml=truckscenesyaml, args=args, config=config)
